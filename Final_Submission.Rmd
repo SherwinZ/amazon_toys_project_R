@@ -1,0 +1,1956 @@
+---
+title: "A3 - Competitive Strategy for Toys Company on Amazon"
+author: "Shengwei Zheng"
+date: "10/18/2019"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, warning = F, message = F, fig.width = 9, fig.height = 6)
+```
+
+```{r Environment Initialization, message = F}
+library(tidyverse)
+library(pageviews)
+library(httr)
+library(jsonlite)
+library(reprex)
+library(data.table)
+library(ggthemes)
+library(grid)
+library(gridExtra)
+library(scales)
+library(lubridate)
+library(tibbletime)
+library(Hmisc)
+
+library(tidytext)
+library(topicmodels)
+library(wordcloud)
+library(RColorBrewer)
+library(rvest)
+library(ggpubr)
+library(tidyquant)
+library(xts)
+library(xml2)
+library(GGally)
+library(reshape2)
+library(modelr)
+library(ggfortify)
+
+library(RColorBrewer)
+library(broom)
+
+library(keras)
+library(htmlTable)
+library(RSelenium)
+
+options(na.action = na.warn)
+
+# set working directory
+setwd("C:/WFU/Courses/Fall/Data_Mgmt/assignment")
+```
+
+```{r import_data, message = T, echo = F}
+# Raw data
+toys_amazon <- read_csv("Toys_Amazon.csv")
+# Rename lengthy variable names
+toys_amazon <- toys_amazon %>%
+  rename(bought_after_view = items_customers_buy_after_viewing_this_item,
+         also_bought = customers_who_bought_this_item_also_bought,
+         q_a = customer_questions_and_answers,
+         avg_rating = average_review_rating,
+         category = amazon_category_and_sub_category,
+         num_answered_q = number_of_answered_questions,
+         num_aval_stk = number_available_in_stock,
+         num_rev = number_of_reviews)
+
+# Clean data
+toys_prim <- read_csv("toys_prim.csv")
+category <- read_csv("category.csv")
+corr_purchase <- read_csv("corr_purchase.csv")
+corr_view <- read_csv("corr_view.csv")
+price_range <- read_csv("price_range.csv")
+q_a <- read_csv("q_a.csv")
+rev <- read_csv("rev.csv")
+sellers <- read_csv("sellers.csv")
+sentiment_rev <- read_csv("sentiment_rev.csv")
+
+# load scraped data
+load("my_toy.RData")
+```
+
+# 1. Abstract
+
+This narrative outlines how I went through the Amazon dataset, analyze it, and brought up managerial insights and actionable recommendations regarding toys selling on the e-commerce platform.
+
+First, I demonstrated keen ability of tidying the data with regular expression and data wrangling functions and extract 8 tables from the original one based on basic understandings of relational database. Simultaneously I conduct exploratory data analysis with aggregate functions plot various graphs to illustrate a spectrum of statistical metrics like quantiles and time series. This part brought me several hypotheses regarding how to compete on Amazon.
+
+Second, to verify the hypotheses necessitate the acquisition of extra information of the item "also bought" and "also viewed". So, I performed web scrapping with `rvest` and `Rselenium`. The latter is powerful but slow while it is the only way since the tech giant save the cellular data by adding browser-loaded widgets, which is beyond the ability of non-browser-kind rvest.
+
+Then I extracted insights by conducting text mining, time series analysis, linear regression, and neural network model. This is how I test the hypotheses I came up with in the first part of the narrative.
+
+Last but not the least, all the data and libraries needed were pre-loaded and only relevant parts of codes and charts will be shown for the sake of storytelling.
+
+# 2. Data Cleaning and Wrangling
+
+The raw data of Toys_Amazon were dirty. Missing values are common, unstructured data need to be tided, and some fields have nested tables that need to be unnested.
+
+```{r Na counts, echo = F}
+# count the # of NAs for each variable and assign it to na_count
+na_count <- toys_amazon %>%
+  select(everything()) %>%
+  summarize_all(funs(sum(is.na(.)))) 
+
+# Transpose the na_count table
+na_count <- tibble(var = names(na_count), 
+                   count = unlist(transpose(na_count)))
+
+# plot the na_count
+ggplot(na_count, aes(reorder(`var`, + `count`), `count`, fill = `var`)) +
+  geom_bar(stat = "identity", alpha = 0.5, width = 0.618) +
+  coord_flip() + 
+  geom_text(aes(y = `count`, label = `count`), position = position_dodge(0.9), hjust = -0.5) +
+  labs(title = "# NAs for all variable of the original data-set") +
+  ylim(-100, 10000) +
+  theme(legend.position = "none") +
+  theme(axis.ticks = element_line(color = "white")) +
+  xlab("Variable name")
+```
+
+Data cleaning is not only about formatting the data into the supposed data structure, but also about wrangling the structure of the table. Both are relevant to our analysis in the next step. I followed the three rules which make a dataset tidy:
+- Each variable must have its own column;
+- Each observation must have its own row;
+- Each value must have its own cell.
+
+Guided by them, I separated the original table into eight ones with the `uniq_id` as the primary key of each table. The metadata and the sample code for data cleaning can be found in the appendix. For codes of data cleaning, I have included some improvements on them by replacing iterations with vectorized computation, which saved a lot of time.
+
+# 3. Exploration Data Analysis
+
+Exploratory data analysis (EDA) facilitate data scientist in formulating hypotheses that could lead to new data collection and experiments. Here I hypothesized that:
+
+- The review contents per se are more reliable than the ratings because the latter are spurious
+- There is a positive New Year effect on the sales and sales volume
+- Big brands like to form a matrix of products to contest other brands
+- The position of products in the "also view" field is purposely designed
+
+## 3.1 Number of Reviews -- Indicator of 'Sales Volume'
+
+Assuming that the probability of a consumer to comment on the product is the same across all products, it is safe to say that the number of reviews is an appropriate indicator of sales volume so I denote the count as 'sales volume'. The 'sales volume' depends on two factors: the propensity of a consumer of the product to comment and the product's actual sales.
+
+Please note that the ticks on x axis represents the Jan 1st for each year.
+The plot of the 'sales volume' over time reflects that:
+
+- the 'sales volume' have an oscillating period of 1 year;
+
+- over every oscillation, the 'sales volume' peaks at the very beginning, falls sharply, drifts lower through the mid-year, and finally skyrockets when it comes to the year end;
+
+- the 'sales volume' of all toys in the data-set has been growing since 2002, the earliest year in the data-set, with a take-off in 2009.
+
+The peaks seem abnormal to me at first, but previous data inspection has revealed that the date information nested in the `rev` (`customer_reviews`) column is complete without any coercion to `Jan-1` or alike.
+
+However, the lowest point in 2016 breaks through that of 2015, a pretty conspicuous phenomenon amid the overall climbing trend with the ever highest volume a few months ago. Nonetheless, if there is no evidence that those data are indeed abnormal, we should keep them in the future analyses.
+
+```{r number of reviews over time, echo = F}
+# Plot the sales count per month for the whole time span of the original reviews data
+rev_timespan <- rev %>% 
+  mutate(year_month = 
+    paste(year(rev$date), month(rev$date), "15", sep = "-")) %>%
+  group_by(year_month) %>%
+  dplyr::summarize(sales = n(), avg_rat_all = mean(rating), 
+                   std_rat_all = sd(rating))
+
+is.nan.data.frame <- function(x)
+do.call(cbind, lapply(x, is.nan))
+rev_timespan$std_rat_all[is.nan(rev_timespan$std_rat_all)] <- 0
+
+rev_timespan <- rev_timespan %>%
+  mutate(year_month = as.Date(year_month, format = "%Y-%m-%d"))
+
+whole <- rev_timespan %>%
+  ggplot(aes(x = year_month, y = sales)) +
+  geom_line(color = "#4682B4") +
+  scale_x_date(breaks = date_breaks("2 years"), label = date_format("%Y")) +
+  labs(title = "'sales volume' from 2001 to 2017") +
+  geom_vline(aes(xintercept = as.Date("2009-01-01"), colour="#7B68EE"), size = 2, linetype = 4) +
+  theme(legend.position = "none")
+
+# Pick out the data after 2009 yr and plot them separately
+rev_2009 <- rev_timespan %>%
+  filter(year_month >= as.Date("2009-01-01"))
+after_2009 <- rev_2009 %>%
+  ggplot(aes(x = year_month, y = sales)) +
+  geom_line(color = "#4682B4") +
+  scale_x_date(breaks = date_breaks("1 year"), label = date_format("%Y")) +
+  labs(title = "'sales volume' from 2009 to 2017") +
+  stat_smooth(se = F, color = "#FF1493", alpha = 0.7) +
+  geom_vline(aes(xintercept = as.Date("2009-01-01"), colour="#7B68EE"), size = 2, linetype = 4) +
+  theme(legend.position = "none")
+  
+whole
+after_2009
+```
+
+
+## 3.2 The rating Was Very Volatile Until Around 2007
+
+Given this phenomenon, it is suggestible for us to take the statistical power of data into consideration. Basing our recommendations on data before 2007 is not advisable because the sample is not enough to support them.
+
+```{r rating over time, echo = F}
+rev_timespan %>%
+  ggplot(aes(x = year_month)) +
+  geom_line(aes(y = avg_rat_all), color = "#4682B4") +
+  geom_line(aes(y = std_rat_all), color = "#FFA500") +
+  ylab("avg_rating & std_rating") +
+  scale_x_date(breaks = date_breaks("2 years"), label = date_format("%Y")) +
+  labs(title = "'sales volume' from 2001 to 2017") +
+  geom_vline(aes(xintercept = as.Date("2007-01-01"), colour="#7B68EE"), size = 2, linetype = 4) +
+  theme(legend.position = "none")
+```
+
+## 3.3 Ratings of Toy Are Spurious 
+
+At first, I attempted to determine whether there is a correlation between rating and 'sales volume', between rating and cat, or between rating and brand. However, I turned out to find that the rating in the data-set was too spurious, with 1073 manufactures' mean ratings more than 4.9, to extract any market insight based on them.
+
+A flush of high ratings will undermine the accuracy of their indicating efficiency of a product's quality. For example, even a child would know the rating was weighted in the ranking system, so cases might be that the sellers inflate their rating by intentionally luring the consumer to rate higher. 
+
+```{r Correlations with rating, echo = F}
+# Prepare the table for rating and brand or rating and cat
+# Tom & Jerry hhh
+rat_manf_cat <- toys_prim %>%
+  left_join(category, by = "uniq_id") %>%
+  select(uniq_id, manufacturer, cat1, avg_rating)
+
+avg_rat_manf <- rat_manf_cat %>%
+  group_by(manufacturer) %>%
+  dplyr::summarize(avg_rat_m = mean(avg_rating)) %>%
+  filter(avg_rat_m >= 2.0)
+
+# Calculate the count of manufacturer for each avg_rating group
+n_avg_rat_manf <- avg_rat_manf %>%
+  ungroup() %>%
+  mutate(tag = cut(avg_rat_m, breaks = 8)) %>%
+  group_by(tag) %>%
+  dplyr::summarize(n_cut = n())
+
+# plot the distribution of rating
+avg_rat_manf %>%
+  ggplot(aes(x = cut(avg_rat_m, breaks = 8))) +
+  geom_bar(aes(fill = "#FFA07A"), alpha = 0.8, width = 0.618) +
+  theme(legend.position = "none") +
+  geom_text(data = n_avg_rat_manf, 
+            aes(x = tag, y = n_cut, label = n_cut), 
+            position = position_dodge(0.9), vjust = -0.5) +
+  ylim(-50, 1550) +
+  theme(axis.ticks = element_line(color = "white")) +
+  xlab("rating bracket") +
+  labs(title = "# products per rating bracket")
+```
+
+However, several outliers pop out when we transfer our focus to products of low scoring. Although Hasbro sells well overall, some products were evaluated as bad.
+
+```{r Which brand sells best, echo = F}
+# Join the tables toys_prim and rev
+prim_rev_cat <- toys_prim %>%
+  left_join(rev, by = "uniq_id") %>%
+  left_join(category, by = "uniq_id") %>%
+  select(uniq_id, product_name, manufacturer, 
+         price, avg_rating, rating, date, cat1) %>%
+  na.omit(date)
+
+# Plot the 'sales volume' for prominent brands
+prim_rev_sum2 <- prim_rev_cat %>%
+  group_by(manufacturer) %>%
+  dplyr::summarize(n_per_brand = n()) %>%
+  na.omit(n_per_brand) %>%
+  filter(n_per_brand > 100)
+
+# Plot the 'sales volume' for the most prominent 10 brands by category
+prim_rev_top10 <- prim_rev_cat %>%
+  group_by(manufacturer) %>%
+  dplyr::summarize(n_per_brand = n()) %>%
+  na.omit(n_per_brand) %>%
+  filter(n_per_brand > 250)
+
+prim_cat_top10 <- prim_rev_cat %>%
+  filter(manufacturer %in% prim_rev_top10$manufacturer) %>%
+  left_join(prim_rev_top10, by = "manufacturer")
+```
+
+```{r find outliers in the lower part, echo = F}
+# set up position object
+posn.d <- position_dodge(width = 0.2)
+posn.jd <- position_jitterdodge(jitter.width = 0.1, dodge.width = 0.9)
+posn.j <- position_jitter(width = 0.1)
+
+# data about manufacturer of top10 reviews grabed from 5.3
+# rating averaged by product
+square <- data.frame(x1 = c(1.5, 1.5), x2 = c(2.5,2.5), 
+                     y1 = c(2.2, 3.5), y2 = c(2.4, 3.7))
+prim_cat_top10 %>%
+  ggplot(aes(manufacturer, avg_rating, col = manufacturer)) +
+  geom_point(position = posn.j, alpha = 0.2) +
+  stat_summary(color = "black", geom = "point", 
+               fun.y = mean, position = posn.d) +
+  stat_summary(color = "black",  
+               geom = "errorbar", fun.data = mean_sdl,
+               fun.args = list(mult = 1), width = 0.3) +
+  coord_flip() +
+  theme(legend.position = "none") +
+  labs(title = "rating of top 10 'sales volume' brand (averaged by product)") +
+  ylab("mean rating for each product") +
+  geom_rect(data = square, mapping = aes(xmin = x1, xmax = x2, 
+                        ymin = y1, ymax = y2), 
+            color="red", alpha=0, inherit.aes = F)
+
+# What is wrong with the low-rated products
+# prim_cat_top10 %>%
+#  filter()
+```
+
+
+
+## 3.4 Seasonality of Toys Sales Volume
+
+Obviously, the market of toys generally booms in January and December, so it is reasonable to hypothesize that there is a positive "New Year" effect on the sales of toys on Amazon.
+
+To ensure the power of data, I filtered out the rev before 2009 because the "sales volume" were too small as illustrated in chapter 3.2.
+Besides, I need to make a clarification that the extremely low point in the end of time series may just be the effect of data truncation and we can easily deal with it using the moving average method.
+
+```{r seasonality of sales, echo = F}
+after_2009
+
+rev_season <- rev %>%
+  ungroup() %>%
+  select(uniq_id, rating, date_rev = date)
+
+# calculate the date of order by roling back the date of reviews by a week
+rev_season$date_order = rev_season$date_rev - 7
+
+rev_season <- rev_season %>%
+  mutate(month_order = as.integer(month(date_order)),
+         qtr_order = quarter(date_order),
+         # Create dummy variable for quarter
+         qtr_2 = qtr_order == 2,
+         qtr_3 = qtr_order == 3,
+         qtr_4 = qtr_order == 4,
+         dj = month_order == 1 | month_order == 12)
+
+# Plot the 'sales volume' by month
+month_sales <- rev_season %>%
+  group_by(month_order) %>%
+  dplyr::summarize(sales = n(), qtr_order = first(qtr_order)) %>%
+  na.omit()
+
+month_sales %>% 
+  ggplot(aes(x = month_order, y = sales)) +
+    geom_bar(aes(fill = qtr_order), stat = "identity", width = 0.618) +
+    geom_line(aes(color = "#FA8072"), size = 2, alpha = 0.8) +
+    geom_text(aes(y = sales, label = sales), position = position_dodge(0.9), vjust = -0.5) +
+    scale_x_continuous(breaks = seq(1, 12, by = 1)) +
+    labs(title = "# order per month") +
+    ylim(-50, 4500) +
+    theme(legend.position = "none") +
+    theme(axis.ticks = element_line(color = "white"), axis.text.y = element_blank()) +
+    labs(title = "'sales volume' per month")
+```
+
+
+# 4. Web Scraping Extra Information
+
+
+Continuing my past work on the Amazon toys dataset, I dived, and have been really wanting to, into the links stored in the `corr_view` data since we have not yet looked into it while it was the information behind the links that was precious to our analyses. For example, I was interested in the popularity of a certain product, especially when it was compared with its direct competitors since the category "building blocks" would definitely be considered in higher demand than customs in terms of the absolute number of shelved items.
+
+Therefore, I scraped the Amazon.com in this assignment, which I were not able to during the summer because, said Mr.Gleason, the website utilized JavaScript and only browser can convert it into actual html document. But with RSelenium, I built a virtual browser in a Linux environment and crawled the webpage via it with command lines. I sampled some links from the `customer also shoppped for` field and built a neural network model using Google tensorflow. 
+
+To test my hypothesis, I decided to exploit the "Customers also shopped for" field because the relations between products are the most valuable information on the all-linked Internet and it was the "endorsement" of a website to another that the Google or other search engines employed in their algorithms.
+
+However, Amazon has deployed many anti-crawler techniques. Kindly recommended by Mr.Gleason, our guest speaker, I used `Rselenium`, which is very powerful in such situation but time-consuming simultaneously -- 48 hours for me to acquire 10K+ entries.
+
+## 4.1 Amazon's Web Page Analysis
+
+If we try crawling the amazon's product page with `rvest` directly, we will get a void value on many relevant fields such as the "Customers also shopped for". My suspicion is that Amazon's product webpages utilize Adobe Flash or JavaScript to save data celluar in the communication so we have to deceive Amazon with a virtual browser created by `RSelenium`.
+
+```{r single page attempt}
+
+# Customers also shopped for
+(link <- corr_view$also_view[1])
+doc <- read_html(link)
+  
+# corr name
+# #anonCarousel1 .p13n-sc-truncated
+doc %>%
+  html_nodes(css = "#anonCarousel1 .p13n-sc-truncated")
+```
+
+## 4.2 Web Scraper Based on RSelenium
+
+By contrast, the RSelenium enables us to communicate with a remote or local server with command lines -- navigate to the targeted website, access certain HTML nodes, scrape them down, and then next. 
+
+Here I used a browser set up on my personal computer in a Linux environment.
+
+![docker1](C:/WFU/Courses/Fall/Data_Mgmt/assignment/A2_pic/docker1.png)
+
+By using the TightVNC, a remote control software, we can visualize our server in real time. To do that, we need to download and install this software with the Administrator's authorization, launch it, fill in the first blank with the id and the port, 192.168.99.100:: on my computer, click connect, and use the "secret" as the password as set by the docker ["standalone-chrome"](https://github.com/SeleniumHQ/docker-selenium).
+
+![vnc1](C:/WFU/Courses/Fall/Data_Mgmt/assignment/A2_pic/vnc1.png)
+
+It is truly amazing that we can see how the virtual browser interact with us when we send commands to it.
+
+```{r single page attempt cont, echo = F, warning = F}
+link <- corr_view$also_view[1]
+
+## 1. SET UP RSelenium
+# Before we access the server on R, we need to initiate an instance in our local environment by ruinning the line below in the docker.
+# docker run --name chrome  -d -p 4445:4444 -p 5901:5900 selenium/standalone-chrome-debug:latest
+
+
+# tools used: docker, standalone-chrome, tightVNC
+# need to change based on the local ip shown in the machine's docker
+IP <- "192.168.99.100"
+
+# set up our virtual browser
+remDr <- remoteDriver(remoteServerAddr = IP,
+                      port = 4445L,
+                      browser = "chrome")
+
+# check available keys that wen can send
+RSelenium:::selKeys %>% names()
+
+
+# # initiate our browser
+# remDr$open()
+# remDr$navigate("http://www.google.com")
+# Sys.sleep(5)
+# webElem <- remDr$findElement("name", "q")
+# Sys.sleep(5)
+# webElem$sendKeysToElement(list("HELLO WORLD"))
+# Sys.sleep(5)
+# webElem$sendKeysToElement(list(key = 'enter'))
+
+# # can also play with the browser using the code below
+# class(remDr)
+# remDr$goBack()
+# remDr$goForward()
+
+# Initialization for the loop
+
+get_html <- function(remDr){
+  remDr$getPageSource() %>%
+   .[[1]] %>%
+  read_html()
+}
+
+# create a function for multiple field
+get_product <- function(link, remDr){
+  
+  # The dataset originates from the UK's Amazon
+  base_link <- "http://www.amazon.co.uk"
+  
+  # Initilization for the function
+  
+  # buffer time for webpage to load
+  
+  doc <- get_html(remDr)
+  remDr$navigate(link)
+
+  # regard link as the id of an observation -- product (toy)
+  
+  # product_name
+  # #productTitle
+  product_name <- doc %>%
+    html_nodes("#productTitle") %>%
+    html_text() %>%
+    str_trim()
+  
+  # brand
+  # #bylineInfo
+  brand <- doc %>%
+    html_nodes("#bylineInfo") %>%
+    html_text() %>%
+    str_trim()
+  
+  # star rating
+  # .arp-rating-out-of-text
+  product_star <- doc %>%
+    html_nodes(".arp-rating-out-of-text") %>%
+    html_text() %>%
+    str_trim() %>%
+    # convert string to number
+    str_remove_all(" out of 5 stars") %>%
+    as.numeric()
+  
+  # price
+  # #priceblock_ourprice
+  product_price <- doc %>%
+    html_nodes("#priceblock_ourprice") %>%
+    html_text() %>%
+    str_trim() %>%
+    str_remove_all("£") %>%
+    as.numeric()
+  
+  # category
+  # #wayfinding-breadcrumbs_feature_div .a-size-small
+  category <- doc %>%
+    html_nodes("#wayfinding-breadcrumbs_feature_div .a-size-small") %>%
+    html_text() %>%
+    str_trim() %>%
+    str_remove_all("\n[[:space:]]*")
+  
+  # n_rev
+  # #prodDetails .a-size-small .a-link-normal
+  n_rev <- doc %>%
+    html_nodes("#prodDetails .a-size-small .a-link-normal") %>%
+    html_text() %>%
+    str_trim() %>%
+    str_remove_all(" customer reviews") %>%
+    as.numeric()
+  
+  ######
+  # also_view
+  # #anonCarousel1 .a-link-normal
+  partial_also_view <- doc %>%
+    html_nodes("#anonCarousel1 .a-link-normal.a-text-normal") %>%
+    html_attr("href")
+  also_view <- paste0(base_link, partial_also_view)
+  
+  ######
+  # also_bought 
+  # #anonCarousel2 .a-link-normal
+  partial_also_bought <- doc %>%
+    html_nodes('#anonCarousel2 .a-link-normal.a-text-normal') %>%
+    html_attr("href")
+  also_bought <- paste0(base_link, partial_also_bought)
+  
+  ########
+  ## review
+  
+  # rev_title
+  # #cm-cr-dp-review-list .a-text-bold span
+  rev_title <- doc %>%  
+    html_nodes(".review-title-content.a-text-bold") %>%
+    html_text() %>%
+    str_trim()
+  
+  # rev_author
+  # .a-profile-name
+  rev_author <- doc %>%  
+    html_nodes(".a-profile-name") %>%
+    html_text() %>%
+    str_trim()
+  
+  # rev_date
+  # .review-date
+  rev_date <- doc %>%  
+    html_nodes(".review-date") %>%
+    html_text() %>%
+    str_trim() %>%
+    as.Date(format = "%d %B %Y")
+  
+  ## hard, capture pop up content
+  # rev_rating
+  # #cm-cr-dp-review-list .a-icon-alt
+  rev_star <- doc %>%
+    html_nodes(".cr-translate-cta+ .a-row") %>%
+    html_nodes(".a-icon-alt") %>%
+    html_text() %>%
+    str_trim() %>%
+    # convert string to number
+    str_remove_all(" out of 5 stars") %>%
+    as.numeric()
+  
+  rev_star2 <-  doc %>%
+    html_nodes("#cm-cr-cmps-review-list .celwidget") %>%
+    html_nodes(".a-icon-alt") %>%
+    html_text() %>%
+    str_trim() %>%
+    # convert string to number
+    str_remove_all(" out of 5 stars") %>%
+    as.numeric()
+    
+  rev_star <- append(rev_star, rev_star2)
+  # rev_contents
+  # .a-expander-partial-collapse-content span
+  rev_contents <- doc %>%  
+    # .cr-widget-CrossMarketplaceSharing , .card-padding
+    html_nodes(".cm_cr_grid_center_container") %>%
+    html_nodes(".a-expander-partial-collapse-content > span") %>%
+    html_text() %>%
+    str_trim()
+  
+  ###################################
+  ## create relational tables
+  tryCatch({
+  # 1.primary table
+  toys_prim <- tibble(
+    link_id = link,
+    brand = brand,
+    product = product_name,
+    star_rating = product_star,
+    price = product_price,
+    n_rev = n_rev
+  )
+  
+  # 2.category
+  category <- tibble(
+    link_id = link,
+    category = category
+  )
+  
+  # 3. review
+  review <- tibble(
+    link_id = link,
+    title = rev_title,
+    rating = rev_star,
+    date = rev_date,
+    author = rev_author,
+    contents = rev_contents
+  )
+  
+  # 4. corr_view
+  corr_view <- tibble(
+    link_id = link,
+    also_view = also_view
+  )
+  
+  # 5. corr_purchase
+  corr_purchase <- tibble(
+    link_id = link,
+    also_bought = also_bought
+  )
+  })
+  out <- list(
+    "toys_prim" = toys_prim, 
+    "category" = category, 
+    "review" = review, 
+    "corr_view" = corr_view, 
+    "corr_purchase" = corr_purchase)
+  
+  return(out)
+}
+
+# (my_toy <- get_product(link, remDr))
+
+# remDr$close()
+
+# Binder
+rbind_product <- function(my_product, new_product) {
+  my_prim <- bind_rows(my_product$toys_prim, new_product$toys_prim)
+  my_category <- bind_rows(my_product$category, new_product$category)
+  my_rev <- bind_rows(my_product$review, new_product$review)
+  my_corr_view <- bind_rows(my_product$corr_view, new_product$corr_view)
+  my_corr_purchase <- bind_rows(my_product$corr_purchase, new_product$corr_purchase)
+  
+  out <- list(
+    "toys_prim" = my_prim, 
+    "category" = my_category, 
+    "review" = my_rev, 
+    "corr_view" = my_corr_view, 
+    "corr_purchase" = my_corr_purchase)
+  
+  return(out)
+}
+
+# my_toy <- get_product(corr_view$also_view[1], remDr)
+# t1 <- Sys.time()
+
+# for (link in corr_view$also_view[-1]) {
+# the indexing is inclusive
+
+# 20190924 1:21 AM i = 21797
+# 28654
+# 19165
+# 29244 30769
+# 12007/36758
+# for (link in corr_view$also_view[i+1:nrow(corr_view)]) {
+#   # counting, provide location for debugging
+#   i <- i + 1
+# 
+#   new_toy <- get_product(link, remDr)
+#   my_toy <- rbind_product(my_toy, new_toy)
+#       
+# }
+# t2 <- Sys.time()
+# writeLines(paste("Time elapsed:", format(t2 - t1, format = "%h")))
+# print(i)
+
+# remDr$close()
+```
+
+![scraping](C:/WFU/Courses/Fall/Data_Mgmt/assignment/A2_pic/scraping.gif)
+
+For the page getter, first, it was worth mentioning that I handled errors by employing `tryCatch()` as it is a common situation meet in web scraping.
+
+Second, the reason we use for loop instead of `map()` with a wrapper or other vectorized computation is that it is easier for us to debug using for loop: 
+- it breaks where the error happens, while
+- the `map()` will just split up and we have to start over again every time
+
+The `RSelenium` armed us with the ability to crawl information from more kinds of websites although it was very slow compared to `rvest`. I expect a possible improvement technically to be the multi-thread programming, but my attempt on the grid parallel computing in RSelenium was difficult and the instructions available online were limited so it has not work out yet.
+
+## 4.3 Wrap Up Web Scraping
+
+With these data, I found that big companies, especially those Japanese, like Konami, Tamiya, Pampers, and Hornby dominates the billboard of the most also viewed items, and the correlated visits majorly come from products of the same category.. Combining my own experience in my analysis, I have to say that Japanese toy companies usually do a great job in deploying their product matrix by launching extensibles with many components or differentiating the same one to take over every niche.
+
+```{r tidy, echo = F}
+corr_view <- corr_view %>%
+  group_by(uniq_id) %>%
+  mutate(cv_rank = row_number()) %>%
+  ungroup() %>%
+  group_by(also_view) %>%
+  mutate(cv_id = row_number()) %>%
+  ungroup()
+
+# delete the first repeated row
+toys_prim_cv <- my_toy$toys_prim[2:12008,] %>%
+  group_by(link_id) %>%
+  mutate(cv_id = row_number()) %>%
+  ungroup()
+
+cv_full <- toys_prim %>%
+  select(uniq_id, price, num_rev, avg_rating) %>%
+  inner_join(corr_view, by = "uniq_id") %>% rename(link_id = also_view) %>%
+  inner_join(toys_prim_cv, by = c("link_id", "cv_id")) %>%
+  mutate(price_prim_corr = price.x - price.y) 
+
+reg <- cv_full %>%
+  select(-price.x, -price.y, -link_id, -uniq_id, -product, -cv_id) %>%
+  rename(prim_rating = avg_rating, corr_rating = star_rating, prim_nrev = num_rev, corr_nrev = n_rev) %>%
+  na.omit()
+```
+
+```{r count}
+top30_cv <- cv_full %>%
+  count(product) %>%
+  arrange(by = desc(n)) %>%
+  top_n(30, n) %>%
+  mutate(product2 = fct_reorder(product, n)) 
+
+  # plot it
+top30_cv %>%
+  ggplot(aes(product2, n)) +
+  geom_col(alpha = 0.65, width = 0.618, aes(fill = n)) +
+  # trim the axis labels, it was too long
+  scale_x_discrete(label=function(x) paste0(strtrim(x, 30), "...")) +
+  coord_flip() +
+  theme(axis.ticks = element_line(color = "white"), legend.position = "none") +
+  geom_text(aes(y = n, label = n), position = position_dodge(0.9), hjust = -0.5) +
+  # scale_y_continuous(limit = c(-10, 5000), breaks = seq(0, 5000, by = 1000)) +
+  labs(title = "Overall top 30 words based on frequency after removing stop words",
+       x = "word",
+       y = "frequency") +
+  scale_fill_gradient(low = "#AFEEEE", high = "#9400D3")
+```
+
+In fact we can go with the hyperlink infinitely in Amazon as long as it provides us with the "Customers also shopped for" or "Customers who bought this item also bought". The directory of hyperlinks essentially form a directed graph to which we can apply the graph theory. That is exactly how Google establish its search system and can be of the interest of future analyses.
+
+# 5. After EDA and Data Acquisition
+
+So far I have explored many continuous variables -- `rating`, `number of reviews`, and `number of products` -- in the data-set and blended them with different groups by `manufacturers`, `products`, and `categories`. Nonetheless, there still remains some insights, they are either not of the interest of future analyses, or can only be mined with more advanced models or techniques. 
+
+First, we may conduct regression analysis over some combinations of 2 continuous variables. For example, the number of sellers and the 'sales volume' may have correlation but it is hard to distinguish the effect and the reason. On one hand, cases might be that seller tend to shelf those best-sellers. On the another, it is also probable that the larger the number of sellers, the easier the consumers can buy the product, so the 'sales volume' improves. Different strategies should apply accordingly.
+
+Besides, we may conduct time series analysis based on the date information in the `rev` and blend this information with brand, category, rating, price, or sales. As seen from the graph of 'sales volume' over time from 2001 to 2016, it is obvious that the 'sales volume' has improved steadily. Trends of that kind might exist in other variables.
+
+In addition, we have not yet done anything with the texts in `q_a` and `rev`. Other than the rating manipulation by sellers, the scoring system can also be inaccurate because the scale differs under different background. For example, unlike the United States, in Germany people use 1 to indicate the best.  Therefore, it is very important to extract information about the true thoughts of consumers via topic analysis and sentiment analysis.
+
+# 6. Text Mining Review Contents
+
+In this chapter, I continued what I envisioned in the last one, with sentiment analysis and topic analysis
+
+First, the text was left unexplored in the first case study and it is about time to extract insights from them with more instruments.
+
+Besides, the Amazon and shoppers, if I were to provide consulting services to them, would not be satisfied with simple descriptive statistics, we need to procvide a more solid ground so that they will take our advice.
+
+## 6.1 Tokenizing
+
+The very first step of text mining we should take is to clean the text, the equivalent of data cleaning for structured data. Here is the plot of the top 20 words based on their frequencies after tokenizing.
+
+```{r tokenizing, echo = F}
+tidy_rev <- rev %>% 
+  mutate(rev_id = row_number()) %>%
+  unnest_tokens(word, rev_contents)
+
+# select the top 20 words based on their frequency
+tidy_rev %>%
+  count(word) %>%
+  arrange(desc(n)) %>%
+  top_n(30, n) %>%
+  mutate(word2 = fct_reorder(word, n)) %>%
+# plot them
+  ggplot(aes(word2, n)) +
+  geom_col(alpha = 0.65, width = 0.618, aes(fill = n)) +
+  coord_flip() +
+  theme(axis.ticks = element_line(color = "white"), legend.position = "none") +
+  geom_text(aes(y = n, label = n), position = position_dodge(0.9), hjust = -0.5) +
+  scale_y_continuous(limit = c(-2, 55000), breaks = seq(0, 55000, by = 5000)) +
+  labs(title = "Overall top 30 words based on frequency",
+       x = "word",
+       y = "frequency") +
+  scale_fill_gradient(low = "#FFE4B5", high = "#FF4500")
+```
+
+However, most parts of the reviews are meaningless stop words, so I removed them by matching them to a list of stop words. In R, we can do this easily through joining the list against the original data-set using `dplyr::inner_join()`.
+
+Besides, I added some customized stop words to improve the tokenizing effect specifically for our dataset -- Toys_Amazon.
+
+The tokenizing effect improved a lot after the removal of stop words.
+
+```{r remove stop words, echo = F}
+custom_stop_words <- tribble(
+  # Column names should match stop_words
+  ~word, ~lexicon,
+  # Add http, win, and t.co as custom stop words
+  "http", "CUSTOM",
+  "2", "CUSTOM"
+)
+
+# Bind the custom stop words to stop_words
+stop_words2 <- stop_words %>% 
+  bind_rows(custom_stop_words)
+
+tidy_rev <- rev %>%
+  mutate(rev_id = row_number()) %>%
+  unnest_tokens(word, rev_contents) %>%
+  dplyr::anti_join(stop_words2, by = "word")
+
+tidy_rev <- tidy_rev %>%
+  mutate(contain_num = grepl(pattern = "\\d+|_", x = tidy_rev$word)) %>%
+  filter(contain_num == F) %>%
+  select(-contain_num)
+
+tidy_rev %>%
+  count(word) %>%
+  arrange(desc(n)) %>%
+  top_n(30, n) %>%
+  mutate(word2 = fct_reorder(word, n)) %>%
+# plot them
+  ggplot(aes(word2, n)) +
+  geom_col(alpha = 0.65, width = 0.618, aes(fill = n)) +
+  coord_flip() +
+  theme(axis.ticks = element_line(color = "white"), legend.position = "none") +
+  geom_text(aes(y = n, label = n), position = position_dodge(0.9), hjust = -0.5) +
+  scale_y_continuous(limit = c(-10, 5000), breaks = seq(0, 5000, by = 1000)) +
+  labs(title = "Overall top 30 words based on frequency after removing stop words",
+       x = "word",
+       y = "frequency") +
+  scale_fill_gradient(low = "#AFEEEE", high = "#9400D3")
+```
+
+Alternatively, a word cloud may give us a holistic impression of what the top words are.
+
+Christmas stands among other top words, to some extent verifying my hypothesis about seasonality in chapter 3.4.
+
+```{r worcloud}
+word_counts_overall <- tidy_rev %>%
+  count(word)
+
+wordcloud(
+  words = word_counts_overall$word,
+  freq = word_counts_overall$n,
+  max.words = 50,
+  random.order = F,
+  colors = brewer.pal(8, "Dark2")
+  )
+gc()
+```
+
+The chart below gave us a clue of what words will likely show in a review with a given star rating.
+
+```{r word counts dif rating}
+word_counts_t20 <- tidy_rev %>%
+  count(word, rating) %>%
+  group_by(rating) %>%
+  top_n(20, n) %>%
+  # Ungroup before reordering word as a factor by the count
+  ungroup() %>%
+  mutate(word2 = reorder(word, n))
+
+word_counts_t20 %>%
+  ggplot(aes(word2, n, fill = factor(rating))) +
+  geom_col(show.legend = F, alpha = 0.65, width = 0.618) +
+  # Facet by whether or not its a complaint and make the y-axis free
+  facet_wrap(~ rating, scales = "free_y") +
+  coord_flip() +
+  theme(axis.ticks = element_line(color = "white")) +
+  geom_text(aes(y = n, label = n), position = position_dodge(0.9), hjust = -0.5) +
+  #scale_y_continuous(limit = c(-5, 5200), breaks = seq(0, 5200, by = 1000)) +
+  labs(title = "Top 20 words based on frequency for each star rating",
+       x = "word",
+       y = "frequency")
+```
+
+
+## 6.2 Sentiment Analysis
+
+I prefer the sentiment scores over the star ratings for several reasons.
+
+For one thing, the ratings were very volatile and spurious that undermine the validity of our analyses. For another, what the people express in the reviews do not always coincide with what they rate. It is advisable that we dig into the actual text to see what is their true opinion on the products as it is a common paradigm in marketing now.
+
+Because we are interested in just the negative or positive sentiment of a review, it is best to employee the **Afinn dictionary** rather than the **bing, Loughran, and NRC dictionaries**. Their characters are listed respectively as below:
+
+| Dictionary | Description                                                  |
+| ---------- | ------------------------------------------------------------ |
+| Bing       | A list of 4782 negative and 2006 positive words              |
+| Afinn (using) | Instead of each word being tagged as negative or positive, gives a numeric score with a negative score indicating negative sentiment and a positive score indicating positive sentiment |
+| Loughran   | Contains a number of other sentiments than just negative and positive. Negative is the most common in the dictionary, with other sentiments like "litigious" and "superfluous" |
+| NRC        | Similar to Loughran, with some nuance in specific sentiments |
+
+The sentiment score for each rating is less inflated than is the star rating.
+
+```{r calculate sentiment score, echo = F}
+# create the rev table with tokenized word and sentiment score
+sentiment_rev <- tidy_rev %>%
+  inner_join(get_sentiments("afinn"), by = "word")
+
+# inspect the overall average sentiment score
+sentiment_rev %>% 
+  dplyr::summarize(avg_score = mean(value), median_score = median(value))
+
+
+# sentiment score for each review, calculated using mean()
+sent_per_rev <- sentiment_rev %>%
+  group_by(uniq_id, date, rating) %>%
+  dplyr::summarize(rev_score = mean(value), rev_id = first(rev_id)) %>%
+  ungroup()
+
+posn.jd <- position_jitterdodge(jitter.width = 0.5, dodge.width = 0.9)
+sent_per_rev %>%
+  ggplot(aes(x = rating, y = rev_score)) +
+  geom_point(aes(col = factor(rating)), position = posn.jd, alpha = 0.03) +
+  geom_abline(aes(intercept = -7.5, slope = 2.5), size = 1) +
+  geom_smooth(method = "lm", size = 1.618, se = F) +
+  stat_summary(color = "black", geom = "point", size = 3.5,
+               fun.y = mean, position = posn.d) +
+  stat_summary(color = "black",  
+               geom = "errorbar", fun.data = mean_sdl,
+               fun.args = list(mult = 1), width = 0.1, size = 1.5) +
+  theme(legend.position = "none") +
+  labs(title = "Sentiment score for each rating",
+       y = "the sentiment score for each review") +
+  stat_regline_equation() +
+  stat_cor(label.y = 4.2)
+```
+
+According to the two graphs below, the distribution of sentiment score towards each brand has smaller skewness than does star rating, so there is an improvement in the quality of sentimental metrics. The vertical line represents the median rating/score per brand and the axis scale was forced to be the same.
+
+```{r comparison of distributions of star ratings, echo = F}
+avg_rat_manf %>%
+  ggplot(aes(x = avg_rat_m)) +
+  geom_histogram(aes(fill = "#FFA07A"), alpha = 0.8, bins = 80) +
+  theme(legend.position = "none") +
+  ylim(-1, 600) +
+  xlim(-2.5, 5) +
+  theme(axis.ticks = element_line(color = "white")) +
+  xlab("rating bracket") +
+  labs(title = "Distribution of star rating") +
+  geom_vline(aes(xintercept = median(avg_rat_m)), col = "#3CB371", size = 1)
+
+sent_per_rev %>%
+  inner_join(toys_amazon, by = "uniq_id") %>%
+  group_by(manufacturer) %>%
+  dplyr::summarize(rev_score_manf = mean(rev_score)) %>%
+  ggplot(aes(rev_score_manf)) +
+  geom_histogram(bins = 40, alpha = 0.8, fill = "#4682B4") +
+  ylim(-1, 600) +
+  xlim(-2.5,5) +
+  labs(title = "Distribution of sentiment score",
+       x = "average sentiment score of review for each brand") +
+  geom_vline(aes(xintercept = median(rev_score_manf)), col = "#CD853F", size = 1)
+```
+
+With a more accurate indicator of the reviewer's emotional valence, we are now safe to dig deeper into different market segmentation.
+
+
+## 6.3 Topic Analysis
+
+We have analyzed the sentiment of the reviews. **However, knowing only the sentimentally best and worst scoring brands is not enough, we can go deeper to what the reviewers were exactly talking about. Here comes the employment of topic analysis in text mining for more managerial insights.**
+
+For example, extraction of topics from positive reviews will provide us with the thoughts of the consumers so that we can pitch them effectively in developing future products or optimizing our service.
+
+The topic themselves are a list of all the words in the corpus, often referred to as a dictionary, with probability of the words appearing within each topic. Words that appear often together will have high probabilities of occurring in one or more topics.
+
+![1](C:/WFU/Courses/Intro_to_R/CS/00001e.png)
+
+The graphs are more intuitive for us to comprehend. For topic 1, the top words include loves, son, daughter, and Christmas, etc.. For topic 2, the top words are nice, quality, colors, and plastic. They are the attribute of products -- easiness to play with and price and quality. For topic 3, the top words are fun, easy, playing, and game. Clearly the consumers talks about the joyfulness while playing with the family the most, and then the attribute of products and the enjoyment of pure play. 
+
+Let's name topic 1 as "Family" focused, topic 2 "Product", and topic 3 "Enjoyment".
+
+![2](C:/WFU/Courses/Intro_to_R/CS/00002e.png)
+
+For favorably reviewed toys, reviewers talked more about quality and detail and enjoyment and "Family" relegated to the last. From my perspective, I interpret this shift as the escalation in the "Quality" rather than the retrogradation in the theme "Family" since overall consumer cares about the happiness playing with family members as illustrated by the last graph.
+
+![3](C:/WFU/Courses/Intro_to_R/CS/00003e.png)
+
+For negatively evaluated products, the most prominent topic was the "Enjoyment", the second the "Family", and the last the "Quality". This rank illustrates that the deficient toys lack the easiness to play with. Besides, we can find words like "cards", "dice", and "hard" in the topic, so the worst reviewed toys are those desktop strategy games, again verifying my preceding hypothesis that this type of type seldom satisfy the players for its requirement on creativity and logical thinking by nature.
+
+
+# 7. Time Series Analysis
+
+Recalling what I have explored in chapter 3.4 -- I hypothesized that there is a positive "New Year" effect on the sales of toys on Amazon. It is the time for us to test it!
+Obviously, the market of toys generally booms in January and December
+
+To ensure the power of data, I filtered out the rev before 2009 because the "sales volume" were too small.
+Besides, I need to make a clarification that the extremely low point in the end of time series may just be the effect of data truncation and we can easily deal with it using the moving average method.
+
+## 6.1 Decomposition of the "sales volume"
+
+The graph in 3.4 arose my interest in exploring the time series effect on the "sales" and "sales volume" with time series models. I dug into the the "sales volume" first.
+
+```{r decomposition of sales volume, echo = F}
+# create an xts object
+xts_m_sv <- xts::xts(rev_2009 %>% select(sales_volume = sales), 
+                order.by = rev_2009$year_month)
+ts_m_sv <- ts(xts_m_sv$sales_volume, 
+              frequency = 12)
+
+m_sv_decompose <- decompose(ts_m_sv)
+
+rev_2009 <- rev_2009 %>%
+  arrange(year_month) %>%
+  mutate(trend_sv = m_sv_decompose$trend,       # Trend
+         seasonal_sv = m_sv_decompose$seasonal, # Seasonality
+         random_sv = m_sv_decompose$random)     # Random
+
+plot(m_sv_decompose)
+```
+
+The range of variation of seasonality exceeds 20% of the overall "sales volume" on average. The sales volume do boost on Christmas and the new year.
+
+## 6.2 Decomposition of the "sales"
+
+Decomposing the time series of "sales", the product of the number of reviews and the price of the product, I found that the seasonality also existed.
+
+```{r calculate sales for each month, echo = F}
+sales_by_date <- rev %>% 
+  inner_join(toys_prim, by = "uniq_id") %>%
+  group_by(date) %>%
+  dplyr::summarize(sales = sum(price)) %>%
+  filter(date > as.Date("2009-01-01", format = "%Y-%m-%d"))
+
+# rather than calculate the sales using summarize(), let the time series object help us aggregate the data
+xts_sales <- xts(sales_by_date %>% select(sales), order.by = sales_by_date$date)
+xts_sales_mtd <- to.monthly(apply.monthly(xts_sales, FUN = sum), OHLC = F)
+
+ts_m_sales <- ts(xts_sales_mtd$sales, 
+              frequency = 12)
+m_sales_decompose <- decompose(ts_m_sales)
+
+# waiting for improvement
+plot(m_sales_decompose)
+```
+
+Similarly, the seasonality explains 20% of the total sales on average. No matter what the causation is, the sellers should manage their logistics and brand reputation carefully at that time to not to lose opportunity of exploiting the customer surge.
+
+
+
+# 8. Predictive Modeling
+
+It is time to combine above factors all together and give a description of their influences quantitatively. Among all quantitative models, predictive models like regression or neural networks enable us to locate between-variable insights and utilize the pattern in the future.
+
+## 8.1 Linear Regression
+
+We know from statistics that there are some prescribed steps to follow while conducting linear regression, these steps, though tediously mechanistic, are necessary in helping focus our route and establish the theoretical framework:
+
+1. Exploratory analysis -- calculate pairwise correlation coefficients to determine explanatory variables and a response variable
+
+2. Build models by estimating the coefficients of the line
+
+3. Check R-square, or adjusted R-square if it is a multiple one, and test significant of predictors
+
+4. Analyze residuals with residual plots, Q-Q plots, and residual histogram
+
+5. If the residual diagnostics do not show ideal results, transform some variables and repeat steps 2-5
+
+I modulized these steps by building functions as shown in the appendix.
+
+For the actual modeling, I explored several linear relationships in the Amazon dataset while most of them were not good except one that was for predicting the number of stock.
+
+The correlation plot testified that the sentiment score does not significantly correlate with other variables, nor does the number of reviews. In summary, some preliminary models are of little efficacy in prediction, especially that the model contradicts the assumption that the errors are normally distributed. 
+
+Then found via external desk research, it is can be the case that a one unit change in $x$ leads to a constant percent change in $y$. Hypothesizing does no harm so I just made another attempt by transforming the response variable, `n_stk`, logarithmically and building another model based on it.
+
+With this analysis, I acquired a useful linear regression model for predicting the number of products in stock: <u>lstk = -2.20 + 0.047(n_also_bought) + 0.16(n_seller) + 2.92(show_stkTRUE) + 0.0036(num_rev)</u>.
+
+More specifically, we can predict the percentage increase in the number of products in stock using the second model since the response variable is the logarithmic of the absolute number. For example, every one unit increase in the number of items also bought will lead us to expect an approximate 0.047% increase in the number of a given product in stock. 
+
+We can also predict the absolute value by restoring the scale of the response variable with the natural exponent.
+
+The finding is of great interest of both a consumer and a manager.
+
+For one thing, the the number of stock is not consistently available to consumers on Amazon so if s/he would like to find a highly homogenized product with high delivery reliability, it is advisable to check the stock of the specific one using these 4 parameters in case of urgent demand.
+
+For another, while it is favorable for consumer to choose products with sufficient inventory, a high volume in stock may indicate low management efficiency of a retailing store, no matter online or physical. Therefore, the model is useful for a manager to benchmark the company's competitors and to spiral its own strategy.
+
+## 8.2 Neural Network Using Tensorflow
+
+At first I suspected that deciding the position of a related product may involve the consideration of the features such as the number of reviews, the star rating, the price because those are the information shown directly on a product info page without clicking the hyperlink. Personally, I sometimes would be lured by the recommended "also view' items and be converted eventually by another seller than the one I initially chose. Therefore, it was reasonable to hypothesize that the sellers or manufacturers would campaign in this zone. A common and mature strategy adopted by Consumer Packaged Goods company like P&G is to position products that compete directly with its compatibles because this is a game of "beat or beaten", no middle ground. 
+
+However, the model trained with Neural Network of Tensorflow seemed that these features does not have an impact on the position rank of the also viewed items. The explanation from me is still that the analysis of the consumer behavior is so all-inclusive that demand a higher-dimension data.
+
+Here, I employed a `sequential` model with two densely connected hidden layers, and an output layer that returns a single value. The model building steps are wrapped in a function, build_model. And I decided the MSE, mean square error to be our objective function.
+
+# 9. Conclusion
+
+After all the hard works, I found three insights exploring the toys amazon.
+
+First, if a brand were to improve the public opinion towards itself or attempt to cheat the Amazon's text rating system, it can resort to this kind of toys and try to boost its sales. Besides, the ability to involve interactions among family members is of consistent significance for all kinds of toys if the seller want to harvest favorable reviews. Although the correlation does not imply causation, I believe there is an positive effect on the consumer's sentiment towards a toy as many famous companies, such as Nintendo and Microsoft, pinpoint this feature while advertising their new electronic games. The minimum requirement for a good product is to be of good quality from the consumer's perspective and negatively reviewed products, though not necessarily being bad, should pay attention to the development process and test an innovation many times before marketed. Moreover, it is not advisable for a seller who is anxious in promoting its ratings to step into an area that necessitates creativity and innovation heavily, such as desktop strategy games.
+
+Second, the new year effect do exist on both the sales and the sales volume. The shopper should carefully manage their brand reputation and logistics during that sale-surging period. 
+
+Given that, thirdly, we can achieve that with predictions based on our linear regression model. The number of available stock relates to the number of sellers with an correlation coefficient of 0.61, so a larger number of sellers implies a more reliable delivery and a broader marketing channel. 
+
+-Formula 1: lstk = -2.20 + 0.047(n_also_bought) + 0.16(n_seller) + 2.92(show_stkTRUE) + 0.0036(num_rev)
+
+For one thing, the number of stock is not consistently available to consumers on Amazon so if s/he would like to find a highly homogenized product with high delivery reliability, it is advisable to check the stock of the specific one using these 4 parameters in case of urgent demand. For another, while it is favorable for consumer to choose products with sufficient inventory, a high volume in stock may indicate low management efficiency of a retailing store, no matter online or physical. Therefore, the model is useful for a manager to benchmark the company's competitors and to spiral its own strategy.
+
+- Formula 1: ln(sales_volume) = 2.1203 + 8.013019e-06(price) + 1.360486e-02(number of stock) -3.295586e-01(total average rating) + 1.307442e-02(number of sellers) + 1.210474e-01(number of also viewed items) -4.511009e-02(sentiment score) -1.145273e-01(average rating of verbal review)
+
+Regarding the second linear regression model I built, the every one unit increase in the number of "also viewed" items influences, not causes, the "sales volume" the most if we apply this model into prediction, the sentiment score of the reviews the reverse. So when we see a product with a larger number of correlated items listed as "also view" and comparatively low star rating and sentiment score may implies that the product is selling well. Quite counter-intuitive a phenomenon.
+
+Fourth, the data scraped verified that part of the toy companies on Amazon would make efforts to take over the "also view" area, preventing it from leaving to competitors. By taking over the visits from correlated products, big companies, especially those Japanese, like Konami, Tamiya, Pampers, and Hornby dominates the billboard of the most also viewed items.
+And their strategy was exactly offering extensible components of their toys that lure the consumers into further conversion funnels. It is a good practice that other manufacturers can learn taking its own situation into consideration.
+
+
+# Appendix
+
+## 1. Metadata
+
+For the neatness, I separated the original data-set **toys_amazon** into 7 subsidiary data-sets and joined them to the primary table when necessary, such as summarizing the data based on the `uniq_id`, the primary key.
+
+- **Primary table: toys_prim (10000 obs. of 11 variables)**
+
+| Variable Name                | Customized Variable Name | Data Type               |
+| ---------------------------- | ------------------------ | ----------------------- |
+| uniq_id                      |                          | char                    |
+| product_name                 |                          | char                    |
+| manufacturer                 |                          | char                    |
+| price                        |                          | numeric (9999 for `NA`) |
+| number_available_in_stock    | num_aval_stk             | numeric                 |
+|                              | condition                | char                    |
+| number_of_reviews            | num_rev                  | numeric                 |
+| number_of_answered_questions | num_answered_q           | numeric                 |
+| average_review_rating        | avg_rating               | numeric                 |
+| description                  | description              | char                    |
+| product_description          | (merged with above)      | char                    |
+| product_information          |                          | char                    |
+
+
+- Subsidiary table: **category (10000 obs. of 6variables)**, generated from `amazon_category_and_sub_category`.
+
+| Variable Name | Data Type | Description                                 |
+| ------------- | --------- | ------------------------------------------- |
+| uniq_id       | char      | primary key                                 |
+| cat1          | char      |                                             |
+| cat2          | char      |                                             |
+| cat3          | char      |                                             |
+| cat4          | char      |                                             |
+| cat5          | char      | The lowest level of category in the data-set |
+
+- Subsidiary table: **corr_purchase (49839 obs. of 2 variables)**, generated from `customer_questions_and_answers`.
+
+| Variable Name                                            | Data Type  | Description      |
+| -------------------------------------------------------- | ---------- | ---------------- |
+| uniq_id                                                  | char       | primary key      |
+| also_bought (customers_who_bought_this_item_also_bought) | char (URL) | one link per row |
+
+- Subsidiary table: **corr_view (49839 obs. of 2 variables)**, generated from `customer_questions_and_answers`.
+
+| Variable Name     | Data Type  | Description      |
+| ----------------- | ---------- | ---------------- |
+| uniq_id           | char       | primary key      |
+| bought_after_view | char (URL) | one link per row |
+
+- Subsidiary table: **q_a (1679 obs. of 3 variables)**, generated from `customer_questions_and_answers`.
+
+| Variable Name | Data Type | Description                  |
+| ------------- | --------- | ---------------------------- |
+| uniq_id       | char      | primary key                  |
+| question      | char      | question posted by customers |
+| answer        | char      | answers posted by buyers     |
+
+- Subsidiary table: **rev (29533 obs. of 6 variables)**, generated from `customer_reviews`.
+
+| Variable Name | Data Type | Description                       |
+| ------------- | --------- | --------------------------------- |
+| uniq_id       | char      | primary key                       |
+| title         | char      | title of the review               |
+| rating        | numeric   | rating given by the review author |
+| date          | date      | date the author gave the review   |
+| author        | char      | the author of the review          |
+| rev_contents  | char      | contents of the review            |
+
+- Subsidiary table: **sellers (30155 obs. of 3 variables)**, generated from `customer_reviews`.
+
+| Variable Name | Data Type | Description |
+| ------------- | --------- | ----------- |
+| uniq_id       | char      | primary key |
+| Sellers_name  | char      |             |
+| Sellers_price | numeric   |             |
+
+- Just in case, there is still a back up table **price_range (18 obs. of 3 variables)**   to deal with a few unexpected data in the `price` column -- 18 of them were stored as a price range with low and high.
+
+| Variable Name | Data Type | Description                    |
+| :------------ | :-------- | :----------------------------- |
+| uniq_id       | char      | primary key                    |
+| low           | numeric   | lower bound of the price range |
+| high          | numeric   | upper bound of the price range |
+
+And the tables below show the structure of my data frames from web scraping apart from the original Amazon toys dataset.
+
+- **Primary table: toys_prim (10000 obs. of 11 variables)**
+
+| Variable Name | Data Structure | Description         |
+| ------------- | -------------- | ------------------- |
+| link_id       | char           | key/link of the toy |
+| product       | char           | toy's name          |
+| star_rating   | num            |                     |
+| price         | num            |                     |
+| n_rev         | num            | number of reviews   |
+
+- **`my_toy$category`**
+
+| Variable Name | Data Structure | Description         |
+| ------------- | -------------- | ------------------- |
+| link_id       | char           | key/link of the toy |
+| category      | char           |                     |
+
+- **`my_toy$review`**
+
+| Variable Name | Data Structure | Description          |
+| ------------- | -------------- | -------------------- |
+| link_id       | char           | key/link of the toy  |
+| title         | char           | review title         |
+| rating        | num            | review's star rating |
+| date          | Date           |                      |
+| author        | char           | reviewer             |
+| contents      | char           | review contents      |
+
+- **`my_toy$corr_view`**
+
+| Variable Name | Data Structure | Description               |
+| ------------- | -------------- | ------------------------- |
+| link_id       | char           | link                      |
+| also_view     | char           | link of also viewed items |
+
+
+
+- **`my_toy$corr_purchase`**
+
+| Variable Name | Data Structure | Description               |
+| ------------- | -------------- | ------------------------- |
+| link_id       | char           | link                      |
+| also_bought   | char           | link of also bought items |
+
+
+
+## 2. Code Improvement
+
+### 2.1 Cleaning `sellers` - For loop to vectorized indexing & Regular expression
+
+This change saves many lines and makes it no need for `gsub()` to go over the whole vector again and again
+
+```{r improvement sellers logi op in REXP, eval = F}
+# grab the seller out from the original dataset thus avoid from mutating the latter while tidying the seller
+sellers_info <- toys_amazon %>%
+  select(uniq_id, sellers) %>%
+  na.omit(sellers)
+sellers_c <- sellers_info$sellers
+
+# Inspect a typical seller value
+sellers_c[10]
+
+
+# Before 1
+# get rid of the non-JSON double quotes
+sellers_c <- gsub("\"price incl. VAT\"", "price incl. VAT", sellers_c)
+sellers_c <- gsub("\"price incl. VAT\"", "price incl. VAT", sellers_c)
+sellers_c <- gsub("'Bobs\"n\"Allsorts", "'Bobs n Allsorts", sellers_c)
+sellers_c <- gsub("\"Ships From USA\"", "Ships From USA", sellers_c)
+sellers_c <- gsub("\" We Deliver in 4 Working days \"", "We Deliver in 4 Working days", sellers_c)
+# replace germany "price incl. VAT" and get rid of the double quotes
+sellers_c <- gsub("\"Preise inkl[.] MwSt[.]\"", "price incl. VAT", sellers_c)
+sellers_c <- gsub("\"Preise incl[.] Mwst[.]\"", "price incl. VAT", sellers_c)
+
+# make the resulting table more tidy
+sellers_c <- gsub("name_\\d", "name", sellers_c)
+sellers_c <- gsub("price_\\d", "price", sellers_c)
+# Special case for two-digit 10 !!!
+sellers_c <- gsub("name_\\d\\d", "name", sellers_c)
+sellers_c <- gsub("price_\\d\\d", "price", sellers_c)
+
+
+# After 1
+# get rid of the non-JSON double quotes and replace germany "price incl. VAT"
+sellers_c <- gsub("\"price incl. VAT\"|\"Preise inkl[.] MwSt[.]\"|\"Preise incl[.] Mwst[.]\"", "price incl. VAT", sellers_c)
+sellers_c <- gsub("'Bobs\"n\"Allsorts", "'Bobs n Allsorts", sellers_c)
+sellers_c <- gsub("\"Ships From USA\"", "Ships From USA", sellers_c)
+sellers_c <- gsub("\" We Deliver in 4 Working days \"", "We Deliver in 4 Working days", sellers_c)
+
+# make the resulting table more tidy, including Special case for two-digit 10, Seller_name0, and Seller_price0
+sellers_c <- gsub("name_\\d|name_\\d\\d|name\\d", "name", sellers_c)
+sellers_c <- gsub("price_\\d|price_\\d\\d|price\\d", "price", sellers_c)
+```
+
+```{r improvement sellers vectorized, eval = F}
+# Before 2
+# Initialization for loop
+temp = c()
+sellers = tibble(
+  uniq_id = "a",
+  Seller_name = "a",
+  Seller_price = "a"
+)
+# Parse JSON cell by cell and append it to an orginally empty tibble
+for (i in 1:nrow(sellers_info)) {
+  
+  temp <- sellers_info$sellers[i] %>%
+    fromJSON()
+  
+  temp <- temp$seller %>% 
+    as_tibble() %>%
+    mutate(uniq_id = sellers_info$uniq_id[i]) %>%
+    select(uniq_id, Seller_name, Seller_price)
+  
+  sellers <- bind_rows(sellers, temp)
+}
+sellers <- sellers %>%
+  filter(Seller_price != "a")
+
+
+# After 2
+# Create a function to parse JSON cell by cell for map()
+parse_js <- function(x) {
+  temp <- fromJSON(x)
+  return(as_tibble(temp$seller))
+}
+# use map to vectorize the computation
+# use unnest to align the data
+sellers <- sellers_info %>%
+  mutate(json = map(sellers, ~ parse_js(.))) %>%
+  unnest(json) %>%
+  select(-sellers)
+
+# tremendous improvement in the computation efficiency! From 1 minitue to just seconds on my computer
+```
+
+
+### 2.2 Visualizing Seasonality - For loop to vectorized computation using `map()` 
+
+Another tremendous advancement in reducing the algorithm complexity, from about 15 seconds to a flash.
+
+```{r improvement vectorization seasonality}
+# Before 3
+rev_season <- rev %>%
+  ungroup() %>%
+  select(uniq_id, rating, date_rev = date) %>%
+  mutate(date_order = date_rev)
+
+for (i in 1:nrow(rev_season)) {
+  rev_season$date_order[i] <- rev_season$date_rev[i] -7
+}
+
+
+# After 3
+# Another tremendous improvement in algorithm complexity
+rev_season <- rev %>%
+  ungroup() %>%
+  select(uniq_id, rating, date_rev = date)
+
+rev_season$date_order = rev_season$date_rev - 7
+```
+
+
+### 2.3 Data Integrity - The logarithmic of price is normally distributed around one
+
+Price of large sample by nature obeys a right skewed logarithmically normal distribution because the price cannot be negative. One significant example is the stock price.
+
+Here, the `log_price` has a mean around one when I use 10 as the base number, so the mean price for the data-set is approximately 10.
+
+**I should have noticed that the first execution of code is a dangerous practice.** If the relationship between the `category` table and the `toys_prim` table were not one-to-one, we would face a many-to-many relationship when joining the `rev` table. 
+
+Here, it is feasible to improve the robustness by introducing `unique()` to handle potential replicated entries before joining the `rev` table since we have the prior knowledge that each toy belongs to only one series of category-subcategories, while in other situations we should check the table structure before doing so and treat it case-by-case.
+
+```{r relationship between price and sales volume}
+# Before 4
+# Join the rev table to the primary table
+price_rev <- toys_prim %>%
+  left_join(rev, by = "uniq_id") %>%
+  left_join(category, by = "uniq_id") %>%
+  filter(price != 9999)
+
+# After 4
+# Join the rev table to the primary table
+price_rev <- toys_prim %>%
+  left_join(category, by = "uniq_id") %>%
+  unique() %>%
+  left_join(rev, by = "uniq_id") %>%
+  filter(price != 9999)
+
+# count the rev of each product
+n_price_rev <- price_rev %>%
+  group_by(uniq_id) %>%
+  dplyr::summarize(product_name = first(product_name), price = first(price), 
+                   n_rev = n(), cat1 = first(cat1))
+
+# Plot the distribution of the logarithmic of price
+price_rev %>%
+  mutate(log_price = log10(price)) %>%
+  filter(!is.na(cat1)) %>%
+  ggplot(aes(log_price, fill = cat1)) +
+  geom_histogram(bins = 50) +
+  xlim(-1, 3) +
+  labs(title = "distribution of log_price") +
+  theme(legend.position = "bottom")
+```
+
+
+
+## 3. Web Scraping
+
+The RSelenium enables us to communicate with a remote or local server with command lines -- navigate to the targeted website, access certain HTML nodes, scrape them down, then next.
+
+Here I used a browser set up on my personal computer in a Linux environment.
+
+It is truly amazing that we can see how the virtual browser interact with us when we send commands to it.
+
+Below is my web crawler:
+
+```{r single page attempt2 cont, eval = F}
+(link <- corr_view$also_view[1])
+
+## 1. SET UP RSELENIUM
+# Before we access the server on R, we need to initiate an instance in our local environment by ruinning the line below in the docker.
+# docker run --name chrome  -d -p 4445:4444 -p 5901:5900 selenium/standalone-chrome-debug:latest
+
+
+# tools used: docker, standalone-chrome, tightVNC
+# need to change based on the local ip shown in the machine's docker
+IP <- "192.168.99.100"
+
+# set up our virtual browser
+remDr <- remoteDriver(remoteServerAddr = IP,
+                      port = 4445L,
+                      browser = "chrome")
+
+# check available keys that wen can send
+RSelenium:::selKeys %>% names()
+
+
+# initiate our browser
+remDr$open()
+remDr$navigate("http://www.google.com")
+Sys.sleep(5)
+webElem <- remDr$findElement("name", "q")
+Sys.sleep(5)
+webElem$sendKeysToElement(list("HELLO WORLD"))
+Sys.sleep(5)
+webElem$sendKeysToElement(list(key = 'enter'))
+
+# # can also play with the browser using the code below
+# class(remDr)
+# remDr$goBack()
+# remDr$goForward()
+
+# Initialization for the loop
+
+get_html <- function(remDr){
+  remDr$getPageSource() %>%
+   .[[1]] %>%
+  read_html()
+}
+
+# create a function for multiple field
+get_product <- function(link, remDr){
+  
+  # The dataset originates from the UK's Amazon
+  base_link <- "http://www.amazon.co.uk"
+  
+  # Initilization for the function
+  
+  # buffer time for webpage to load
+  
+  doc <- get_html(remDr)
+  remDr$navigate(link)
+
+  # regard link as the id of an observation -- product (toy)
+  
+  # product_name
+  # #productTitle
+  product_name <- doc %>%
+    html_nodes("#productTitle") %>%
+    html_text() %>%
+    str_trim()
+  
+  # brand
+  # #bylineInfo
+  brand <- doc %>%
+    html_nodes("#bylineInfo") %>%
+    html_text() %>%
+    str_trim()
+  
+  # star rating
+  # .arp-rating-out-of-text
+  product_star <- doc %>%
+    html_nodes(".arp-rating-out-of-text") %>%
+    html_text() %>%
+    str_trim() %>%
+    # convert string to number
+    str_remove_all(" out of 5 stars") %>%
+    as.numeric()
+  
+  # price
+  # #priceblock_ourprice
+  product_price <- doc %>%
+    html_nodes("#priceblock_ourprice") %>%
+    html_text() %>%
+    str_trim() %>%
+    str_remove_all("£") %>%
+    as.numeric()
+  
+  # category
+  # #wayfinding-breadcrumbs_feature_div .a-size-small
+  category <- doc %>%
+    html_nodes("#wayfinding-breadcrumbs_feature_div .a-size-small") %>%
+    html_text() %>%
+    str_trim() %>%
+    str_remove_all("\n[[:space:]]*")
+  
+  # n_rev
+  # #prodDetails .a-size-small .a-link-normal
+  n_rev <- doc %>%
+    html_nodes("#prodDetails .a-size-small .a-link-normal") %>%
+    html_text() %>%
+    str_trim() %>%
+    str_remove_all(" customer reviews") %>%
+    as.numeric()
+  
+  ######
+  # also_view
+  # #anonCarousel1 .a-link-normal
+  partial_also_view <- doc %>%
+    html_nodes("#anonCarousel1 .a-link-normal.a-text-normal") %>%
+    html_attr("href")
+  also_view <- paste0(base_link, partial_also_view)
+  
+  ######
+  # also_bought 
+  # #anonCarousel2 .a-link-normal
+  partial_also_bought <- doc %>%
+    html_nodes('#anonCarousel2 .a-link-normal.a-text-normal') %>%
+    html_attr("href")
+  also_bought <- paste0(base_link, partial_also_bought)
+  
+  ########
+  ## review
+  
+  # rev_title
+  # #cm-cr-dp-review-list .a-text-bold span
+  rev_title <- doc %>%  
+    html_nodes(".review-title-content.a-text-bold") %>%
+    html_text() %>%
+    str_trim()
+  
+  # rev_author
+  # .a-profile-name
+  rev_author <- doc %>%  
+    html_nodes(".a-profile-name") %>%
+    html_text() %>%
+    str_trim()
+  
+  # rev_date
+  # .review-date
+  rev_date <- doc %>%  
+    html_nodes(".review-date") %>%
+    html_text() %>%
+    str_trim() %>%
+    as.Date(format = "%d %B %Y")
+  
+  ## hard, capture pop up content
+  # rev_rating
+  # #cm-cr-dp-review-list .a-icon-alt
+  rev_star <- doc %>%
+    html_nodes(".cr-translate-cta+ .a-row") %>%
+    html_nodes(".a-icon-alt") %>%
+    html_text() %>%
+    str_trim() %>%
+    # convert string to number
+    str_remove_all(" out of 5 stars") %>%
+    as.numeric()
+  
+  rev_star2 <-  doc %>%
+    html_nodes("#cm-cr-cmps-review-list .celwidget") %>%
+    html_nodes(".a-icon-alt") %>%
+    html_text() %>%
+    str_trim() %>%
+    # convert string to number
+    str_remove_all(" out of 5 stars") %>%
+    as.numeric()
+    
+  rev_star <- append(rev_star, rev_star2)
+  # rev_contents
+  # .a-expander-partial-collapse-content span
+  rev_contents <- doc %>%  
+    # .cr-widget-CrossMarketplaceSharing , .card-padding
+    html_nodes(".cm_cr_grid_center_container") %>%
+    html_nodes(".a-expander-partial-collapse-content > span") %>%
+    html_text() %>%
+    str_trim()
+  
+  ###################################
+  ## create relational tables
+  tryCatch({
+  # 1.primary table
+  toys_prim <- tibble(
+    link_id = link,
+    brand = brand,
+    product = product_name,
+    star_rating = product_star,
+    price = product_price,
+    n_rev = n_rev
+  )
+  
+  # 2.category
+  category <- tibble(
+    link_id = link,
+    category = category
+  )
+  
+  # 3. review
+  review <- tibble(
+    link_id = link,
+    title = rev_title,
+    rating = rev_star,
+    date = rev_date,
+    author = rev_author,
+    contents = rev_contents
+  )
+  
+  # 4. corr_view
+  corr_view <- tibble(
+    link_id = link,
+    also_view = also_view
+  )
+  
+  # 5. corr_purchase
+  corr_purchase <- tibble(
+    link_id = link,
+    also_bought = also_bought
+  )
+  })
+  out <- list(
+    "toys_prim" = toys_prim, 
+    "category" = category, 
+    "review" = review, 
+    "corr_view" = corr_view, 
+    "corr_purchase" = corr_purchase)
+  
+  return(out)
+}
+
+(my_toy <- get_product(link, remDr))
+
+# remDr$close()
+
+# Binder
+rbind_product <- function(my_product, new_product) {
+  my_prim <- bind_rows(my_product$toys_prim, new_product$toys_prim)
+  my_category <- bind_rows(my_product$category, new_product$category)
+  my_rev <- bind_rows(my_product$review, new_product$review)
+  my_corr_view <- bind_rows(my_product$corr_view, new_product$corr_view)
+  my_corr_purchase <- bind_rows(my_product$corr_purchase, new_product$corr_purchase)
+  
+  out <- list(
+    "toys_prim" = my_prim, 
+    "category" = my_category, 
+    "review" = my_rev, 
+    "corr_view" = my_corr_view, 
+    "corr_purchase" = my_corr_purchase)
+  
+  return(out)
+}
+
+# my_toy <- get_product(corr_view$also_view[1], remDr)
+t1 <- Sys.time()
+
+# for (link in corr_view$also_view[-1]) {
+# the indexing is inclusive
+
+# 20190924 1:21 AM i = 21797
+# 28654
+# 19165
+# 29244 30769
+# 12007/36758
+for (link in corr_view$also_view[i+1:nrow(corr_view)]) {
+  # counting, provide location for debugging
+  i <- i + 1
+
+  new_toy <- get_product(link, remDr)
+  my_toy <- rbind_product(my_toy, new_toy)
+      
+}
+t2 <- Sys.time()
+writeLines(paste("Time elapsed:", format(t2 - t1, format = "%h")))
+print(i)
+
+# remDr$close()
+```
+
+## 4. Linear Regression - Wrapped Function
+
+```{r lr function, eval = F}
+## 1. Inspect correlation
+corr <- function(data_bank) {
+  
+  ## correlation plot
+  cor_list <- function(x) {
+    L <- M <- cor(x)
+  
+    M[lower.tri(M, diag = TRUE)] <- NA
+    M <- melt(M)
+    names(M)[3] <- "points"
+  
+    L[upper.tri(L, diag = TRUE)] <- NA
+    L <- melt(L)
+    names(L)[3] <- "labels"
+  
+    merge(M, L)
+  }
+  
+  xx <- data_bank %>%
+    do(cor_list(.)) 
+
+  # Finish the plot
+  ggplot(xx, aes(x = Var1, y = Var2)) +
+    geom_point(
+      aes(col = points, size = abs(points)), 
+      shape = 19
+      ) +
+    geom_text(
+      aes(col = labels, size = abs(labels), label = round(labels, 2))
+      ) +
+    scale_size(range = c(0, 6)) +
+    scale_color_gradient2(low = "#7B68EE", high = "#FF4500", limits = c(-1, 1)) +
+    scale_y_discrete("", limits = rev(levels(xx$Var1))) +
+    scale_x_discrete("") +
+    guides(size = FALSE) +
+    geom_abline(slope = -1, intercept = nlevels(xx$Var1) + 1) +
+    coord_fixed() +
+    theme(axis.text.y = element_text(angle = 45, hjust = 1),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          strip.background = element_blank(), 
+          axis.ticks = element_line(color = "white"))
+}
+
+
+## 2. Build model using lm() manually
+## 3. Print out the model's summary
+
+## 4. Residual Analysis
+
+res_eval <- function(mod, db) {
+  # Input: model, data bank.
+  # mod: linear regression model
+  # db: the data bank for the model building
+  
+  ## 4. Residual Analysis
+  
+  ### residual plot
+  print(ggplot(data = mod, aes(index(mod$residuals), mod$residuals)) +
+    geom_hex(bins = 50) +
+    labs(x = "observation index",
+         y = "residuals",
+         title = "Residual Analysis") +
+    scale_fill_gradient(low = "#FFE4C4", high = "#FF4500"))
+  
+  ### segment
+  db <- db %>%
+    add_predictions(mod) %>%
+    add_residuals(mod)
+  
+  # I prefer not to plot them with facet after gathering because the observations are so many
+  print(ggplot(db, aes(n_also_bought, n_stk)) + 
+    geom_point(alpha = 0.3) +
+    geom_point(aes(y = pred), shape = 1) + # add prediction 
+    geom_segment(aes(xend = n_also_bought, yend = pred)) +
+    geom_point(aes(color = resid)) + 
+    scale_color_gradient2(low = "blue", mid = "white", high = "red") +
+    labs(y = "response variable",
+         title = "versus number of items also bought"))
+  
+  print(ggplot(db, aes(n_seller, n_stk)) + 
+    geom_point(alpha = 0.3) +
+    geom_point(aes(y = pred), shape = 1) + # add prediction 
+    geom_segment(aes(xend = n_seller, yend = pred)) +
+    geom_point(aes(color = resid)) + 
+    scale_color_gradient2(low = "blue", mid = "white", high = "red") +
+    labs(y = "response variable",
+         title = "versus number of sellers"))
+    
+  print(ggplot(db, aes(num_rev, n_stk)) + 
+    geom_point(alpha = 0.3) +
+    geom_point(aes(y = pred), shape = 1) + # add prediction 
+    geom_segment(aes(xend = num_rev, yend = pred)) +
+    geom_point(aes(color = resid)) + 
+    scale_color_gradient2(low = "blue", mid = "white", high = "red") +
+    labs(y = "response variable",
+         title = "versus number of reviews"))
+  
+  
+# function res_eval end
+}
+
+```
+
+
+## 5. Neural Network Using Tensorflow
+
+```{r n_rev star order, eval = F}
+
+### 1 DATA BANK ACQUIRING
+
+## 80% of the sample size
+smp_size <- floor(0.8 * nrow(reg))
+
+## set the seed to make your partition reproducible
+set.seed(123)
+train_ind <- sample(seq_len(nrow(reg)), size = smp_size)
+
+train_reg <- reg[train_ind, ]
+test_reg <- reg[-train_ind, ]
+
+train <- train_reg %>% select(- cv_rank)
+train_labels <- train_reg %>% select(cv_rank) 
+train_labels <- train_labels$cv_rank
+
+test <- test_reg %>% select(- cv_rank)
+test_labels <- test_reg %>% select(cv_rank) %>% as.vector()
+test_labels <- test_labels$cv_rank
+
+
+### 2 SCALE
+# Test data is *not* used when calculating the mean and std.
+
+# Normalize training data
+train <- scale(train) 
+
+# Use means and standard deviations from training set to normalize test set
+col_means_train <- attr(train, "scaled:center") 
+col_stddevs_train <- attr(train, "scaled:scale")
+test <- scale(test, center = col_means_train, scale = col_stddevs_train)
+
+train[1, ] # First training sample, normalized
+test[1, ] # First testing sample, normalized
+
+
+### 3 CREATE MODEL
+
+build_model <- function() {
+  
+  model <- keras_model_sequential() %>%
+    layer_dense(units = 64, activation = "relu",
+                input_shape = dim(train)[2]) %>%
+    layer_dense(units = 64, activation = "relu") %>%
+    layer_dense(units = 1)
+  
+  model %>% compile(
+    loss = "mse",
+    optimizer = optimizer_rmsprop(),
+    metrics = list("mean_absolute_error")
+  )
+  
+  model
+}
+
+model <- build_model()
+model %>% summary()
+
+
+### 4 TRAIN THE MODEL
+
+# Display training progress by printing a single dot for each completed epoch.
+print_dot_callback <- callback_lambda(
+  on_epoch_end = function(epoch, logs) {
+    if (epoch %% 80 == 0) cat("\n")
+    cat(".")
+  }
+)   
+
+# default to 500, can be increased if the model does not converge at 500 iterations. The quicker towards convergence, the more robust the model.
+epochs <- 500
+
+# Fit the model and store training stats
+history <- model %>% fit(
+  train,
+  train_labels,
+  epochs = epochs,
+  validation_split = 0.2,
+  verbose = 0,
+  callbacks = list(print_dot_callback)
+)
+
+plot(history, metrics = "mean_absolute_error", smooth = FALSE) +
+  coord_cartesian(ylim = c(0, 2))
+
+```
+
+
+## 6. Data Management Approach
+
+1. Data Tidying
+- tibble: the package is so commonly used that we can hardly perceive its existence. In fact tibble comes not from base R and provides a powerful data structure for us to manipulate
+- readr: import data into the environment as tibble
+- dplyr/data.table: wrangle data - joining, transforming, mainly data manipulation
+- jsonlite: cleaning sellers
+- reprex/stringr: clean text using regular expression
+- reshape2: especially the `melt()` for converting the model nested in a list into a molten data frame
+- broom: tidying statistical models into data frames
+- lubridate/tibbletime: manipulate time or time series data
+- scales: format date or rescale the data (e.g. standardize using standard normal distribution)
+
+2. Visualization
+- ggplot: create the graph
+- ggthemes: polish the graph with pre-settings
+- ggpubr: create polished graph directly
+- GGally: plot the pairwise scatter plot, a data validation step before linear regression
+- grid/gridExtra: laying out multiple plots on a page
+- RColorBrewer: color the plot
+- Hmisc: plot boxplot or add quantiles to the plot
+
+3. Loop and iteration
+- purrr: mainly `map()`
+
+4. Web scrapping
+- rvest: html document getter and analyzer
+- xml2 Xml getter and analyzer
+- htmlTable: parse the html document into data frames
+- RSelenium: build a virtual browser and scrape data via it
+- httr:working with HTTP organised by HTTP verbs (GET(), POST(), etc)
+- pageviews: An API Client for Wikimedia Traffic Data
+
+5. Text mining
+- tidytext: tokenizing, text cleaning, sentiment analysis
+- topicmodels: topic analysis
+- wordcloud: plot wordcloud, with size based on the word frequency
+
+6. Time series
+- tidyquant/xts/zoo: creating and manipulating time series data
+- ggfortify: plot the time series
+
+7. Linear regression
+- modelr: 
+- broom: mentioned in 1
+- reshape2: mentioned in 1
+
+8. Neural Network
+- keras: a high-level API from Google Tensorflow for machine learning
+
+
+# Acknowledgement
+
+First, I would like to give my gratitude to our professor Salge. Your instructions are enlightening and provide possibilities for us to explore.
+
+Besides, special thanks to our dean professor Camm and guest speaker Mr.Gleason who have answered my naive questions while I explored R and the dataset.
+
+In addition, thanks to the harmonious open-source R community, I have learned a lot from other participants and hope one day I can be of help to others.

@@ -1,0 +1,513 @@
+---
+title: "Assignment 1_Linear Regression"
+author: "Shengwei Zheng"
+date: "8/30/2019"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, warning = F, message = F, fig.width = 9, fig.height = 6)
+```
+
+
+# 1. Environment initialization
+As always, initialize the environment at the very beginning.
+
+```{r initialization}
+library(tidyverse)
+library(tidytext)
+library(readr)
+library(reprex)
+library(stringr)
+library(ggthemes)
+library(grid)
+library(gridExtra)
+library(scales)
+library(lubridate)
+library(tibbletime)
+library(Hmisc)
+library(RColorBrewer)
+library(ggpubr)
+library(tidyquant)
+library(reshape2)
+library(broom)
+library(modelr)
+
+options(na.action = na.warn)
+
+# set working directory
+setwd("C:/WFU/Courses/Fall/Data_Mgmt/assignment")
+```
+
+
+Read the 9 exported csv files from Case Study of course Introduction to R into this working environment.
+
+```{r Amazon data import, echo = F}
+toys_prim <- read_csv("toys_prim.csv")
+category <- read_csv("category.csv")
+corr_purchase <- read_csv("corr_purchase.csv")
+corr_view <- read_csv("corr_view.csv")
+price_range <- read_csv("price_range.csv")
+q_a <- read_csv("q_a.csv")
+rev <- read_csv("rev.csv")
+sellers <- read_csv("sellers.csv")
+sentiment_rev <- read_csv("sentiment_rev.csv")
+```
+
+- **Primary table: toys_prim (10000 obs. of 11 variables)**
+
+| Variable Name                | Customized Variable Name | Data Type               |
+| ---------------------------- | ------------------------ | ----------------------- |
+| uniq_id                      |                          | char                    |
+| product_name                 |                          | char                    |
+| manufacturer                 |                          | char                    |
+| price                        |                          | numeric (9999 for `NA`) |
+| number_available_in_stock    | num_aval_stk             | numeric                 |
+|                              | condition                | char                    |
+| number_of_reviews            | num_rev                  | numeric                 |
+| number_of_answered_questions | num_answered_q           | numeric                 |
+| average_review_rating        | avg_rating               | numeric                 |
+| description                  | description              | char                    |
+| product_description          | (merged with above)      | char                    |
+| product_information          |                          | char                    |
+
+
+- Subsidiary table: **category (10000 obs. of 6variables)**, generated from `amazon_category_and_sub_category`.
+
+| Variable Name | Data Type | Description                                 |
+| ------------- | --------- | ------------------------------------------- |
+| uniq_id       | char      | primary key                                 |
+| cat1          | char      |                                             |
+| cat2          | char      |                                             |
+| cat3          | char      |                                             |
+| cat4          | char      |                                             |
+| cat5          | char      | The lowest level of category in the dataset |
+
+- Subsidiary table: **corr_purchase (49839 obs. of 2 variables)**, generated from `customer_questions_and_answers`.
+
+| Variable Name                                            | Data Type  | Description      |
+| -------------------------------------------------------- | ---------- | ---------------- |
+| uniq_id                                                  | char       | primary key      |
+| also_bought (customers_who_bought_this_item_also_bought) | char (URL) | one link per row |
+
+- Subsidiary table: **corr_view (49839 obs. of 2 variables)**, generated from `customer_questions_and_answers`.
+
+| Variable Name     | Data Type  | Description      |
+| ----------------- | ---------- | ---------------- |
+| uniq_id           | char       | primary key      |
+| bought_after_view | char (URL) | one link per row |
+
+- Subsidiary table: **q_a (1679 obs. of 3 variables)**, generated from `customer_questions_and_answers`.
+
+| Variable Name | Data Type | Description                  |
+| ------------- | --------- | ---------------------------- |
+| uniq_id       | char      | primary key                  |
+| question      | char      | question posted by customers |
+| answer        | char      | answers posted by buyers     |
+
+- Subsidiary table: **rev (29533 obs. of 6 variables)**, generated from `customer_reviews`.
+
+| Variable Name | Data Type | Description                       |
+| ------------- | --------- | --------------------------------- |
+| uniq_id       | char      | primary key                       |
+| title         | char      | title of the review               |
+| rating        | numeric   | rating given by the review author |
+| date          | date      | date the author gave the review   |
+| author        | char      | the author of the review          |
+| rev_contents  | char      | contents of the review            |
+
+- Subsidiary table: **sellers (30155 obs. of 6 variables)**, generated from `customer_reviews`.
+
+| Variable Name | Data Type | Description |
+| ------------- | --------- | ----------- |
+| uniq_id       | char      | primary key |
+| Sellers_name  | char      |             |
+| Sellers_price | numeric   |             |
+
+- Just in case, there is still a back up table **price_range (18 obs. of 3 variables)**   to deal with a few unexpected data in the `price` column -- 18 of them were stored as a price range with low and high.
+
+| Variable Name | Data Type | Description                    |
+| :------------ | :-------- | :----------------------------- |
+| uniq_id       | char      | primary key                    |
+| low           | numeric   | lower bound of the price range |
+| high          | numeric   | upper bound of the price range |
+
+- In addition, the table **sentiment_rev (58835 obs of 8 variables)**, an extended version of `rev` collected from case study 2, records the sentiment value for each word after tidy. 
+
+| Variable Name | Data Type | Description              |
+| ------------- | --------- | ------------------------ |
+| uniq_id       | Char      | Product id               |
+| title         | Char      |                          |
+| rating        | Numeric   | Star rating              |
+| date          | Date      |                          |
+| author        | Char      |                          |
+| rev_id        | Numeric   | Unique id of each review |
+| word          | Char      | Tokenized words          |
+| value         | Numeric   | Sentiment score          |
+
+
+# 2. Motivation and Analysis procedures
+
+In the era of big data everything is considered correlated and predictions are readily available under the assumption.
+
+However, previously in the report of Case Study 2 my attempt to predict consumer behaviors -- their decision to buy a product, a.k.a conversion -- resulted in a very low R-squared, which means the explanatory variables barely partition the dependent variable -- the number of reviews. Though there could be some fantastic techniques for improving the predicting efficacy, I prefer the explanation that human beings are complex as any tiny environmental factor can have a significant impact on the decision making process and hence decided to re-steer my modeling. 
+As data modeling is as much a science as an art that obligates perceptions and deductions, I stepped back and reengineered modeling process. The modeling processes is as follows:
+
+- Inspect the pairwise correlations to identify possible linear relationships. At this step I found that the `n_stk1` was strongly related to many variables.
+
+- Experimentally build the linear regression models based on the hypothesized relationship and check its validity using residual analysis and parameters like p-value and R-squared.
+
+- During the iteration of experimental modeling, I took a logarithm of the response variable `n_stk` and excluded variables by keeping data of number of variables less than or equal to 250. Exclusion of outliers helped improve the predicting efficacy by narrowing our target and the logarithmical transformation reengineered the relationship between the reponse variable and the explanatory variables. It may be the case that one unit change in $x$ leads to, rather than a constant change, a **constant percentage change** in $y$ .
+
+# 3. Linear regression and evaluation -- function
+
+We know from statistics that there are some prescribed steps to follow while conducting linear regression, these steps, though tediously mechanistic, are necessary in helping focus our route and establish the theoretical framework:
+
+1. Exploratory analysis -- calculate pairwise correlation coefficients to determine explanatory variables and a response variable
+
+2. Build models by estimating the coefficients of the line
+
+3. Check R-square, or adjusted R-square if it is a multiple one, and test significant of predictors
+
+4. Analyze residuals with residual plots, Q-Q plots, and residual histogram
+
+5. If the residual diagnostics do not show ideal results, transform some variables and repeat steps 2-5
+
+We can modulize these steps by building functions.
+
+```{r lr function}
+## 1. Inspect correlation
+corr <- function(data_bank) {
+  
+  ## correlation plot
+  cor_list <- function(x) {
+    L <- M <- cor(x)
+  
+    M[lower.tri(M, diag = TRUE)] <- NA
+    M <- melt(M)
+    names(M)[3] <- "points"
+  
+    L[upper.tri(L, diag = TRUE)] <- NA
+    L <- melt(L)
+    names(L)[3] <- "labels"
+  
+    merge(M, L)
+  }
+  
+  xx <- data_bank %>%
+    do(cor_list(.)) 
+
+  # Finish the plot
+  ggplot(xx, aes(x = Var1, y = Var2)) +
+    geom_point(
+      aes(col = points, size = abs(points)), 
+      shape = 19
+      ) +
+    geom_text(
+      aes(col = labels, size = abs(labels), label = round(labels, 2))
+      ) +
+    scale_size(range = c(0, 6)) +
+    scale_color_gradient2(low = "#7B68EE", high = "#FF4500", limits = c(-1, 1)) +
+    scale_y_discrete("", limits = rev(levels(xx$Var1))) +
+    scale_x_discrete("") +
+    guides(size = FALSE) +
+    geom_abline(slope = -1, intercept = nlevels(xx$Var1) + 1) +
+    coord_fixed() +
+    theme(axis.text.y = element_text(angle = 45, hjust = 1),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          strip.background = element_blank(), 
+          axis.ticks = element_line(color = "white"))
+}
+
+
+## 2. Build model using lm() manually
+## 3. Print out the model's summary
+
+## 4. Residual Analysis
+
+res_eval <- function(mod, db) {
+  # Input: model, data bank.
+  # mod: linear regression model
+  # db: the data bank for the model building
+  
+  ## 4. Residual Analysis
+  
+  ### residual plot
+  print(ggplot(data = mod, aes(index(mod$residuals), mod$residuals)) +
+    geom_hex(bins = 50) +
+    labs(x = "observation index",
+         y = "residuals",
+         title = "Residual Analysis") +
+    scale_fill_gradient(low = "#FFE4C4", high = "#FF4500"))
+  
+  ### segment
+  db <- db %>%
+    add_predictions(mod) %>%
+    add_residuals(mod)
+  
+  # I prefer not to plot them with facet after gathering because the observations are so many
+  print(ggplot(db, aes(n_also_bought, n_stk)) + 
+    geom_point(alpha = 0.3) +
+    geom_point(aes(y = pred), shape = 1) + # add prediction 
+    geom_segment(aes(xend = n_also_bought, yend = pred)) +
+    geom_point(aes(color = resid)) + 
+    scale_color_gradient2(low = "blue", mid = "white", high = "red") +
+    labs(y = "response variable",
+         title = "versus number of items also bought"))
+  
+  print(ggplot(db, aes(n_seller, n_stk)) + 
+    geom_point(alpha = 0.3) +
+    geom_point(aes(y = pred), shape = 1) + # add prediction 
+    geom_segment(aes(xend = n_seller, yend = pred)) +
+    geom_point(aes(color = resid)) + 
+    scale_color_gradient2(low = "blue", mid = "white", high = "red") +
+    labs(y = "response variable",
+         title = "versus number of sellers"))
+    
+  print(ggplot(db, aes(num_rev, n_stk)) + 
+    geom_point(alpha = 0.3) +
+    geom_point(aes(y = pred), shape = 1) + # add prediction 
+    geom_segment(aes(xend = num_rev, yend = pred)) +
+    geom_point(aes(color = resid)) + 
+    scale_color_gradient2(low = "blue", mid = "white", high = "red") +
+    labs(y = "response variable",
+         title = "versus number of reviews"))
+  
+  
+# function res_eval end
+}
+
+```
+
+
+
+# 4. Model one -- n_stk
+
+In the first model, I selected the number of stock as the response variable that is to be predicted in the future for two reasons.
+
+First, the correlation report shows high feasibility for us to build that model when compared to the one in my Case Study 2 because the latter, in the filed of consumer behaviors, involved too many factors that were not presented in the given dataset thus rendered it unreachable.
+
+More importantly, although the prediction of consumer behavior is of high relevance for a company, the prediction of its internal operation should never be neglected which can be applied to internal risk management and operations management and hence lower the cost and improve efficiency.
+
+To build a model, we should first wrangle the data into a proper format, which I call data bank. Here, I reduced any values of dimensions higher than the product level into the latter's using `mean()`, and then identified probable linear relationships by visualizing the pairwise correlation coefficients.
+
+```{r wrangling raw data into ready-for-model-building data bank}
+
+# sentiment score for each review, calculated using mean()
+sent_per_rev <- sentiment_rev %>%
+  group_by(uniq_id, date, rating) %>%
+  dplyr::summarize(rev_score = mean(value), rev_id = first(rev_id)) %>%
+  ungroup()
+
+reg_sent <- sent_per_rev %>%
+  mutate(new_year = month(date) %in% c(1, 12)) %>%
+  select(rev_score, rating, date, new_year, uniq_id, rev_id)
+  
+reg_seller <- sellers %>%
+  group_by(uniq_id) %>%
+  dplyr::summarize(n_seller = n())
+
+reg_cor_view <- corr_view %>%
+  group_by(uniq_id) %>%
+  dplyr::summarize(n_also_view = n())
+
+reg_cor_buy <- corr_purchase %>%
+  group_by(uniq_id) %>%
+  dplyr::summarize(n_also_bought = n())
+
+
+reg_toys_prim <- toys_prim %>%
+  mutate(show_stk = !is.na(num_aval_stk)) %>%
+  select(-product_name, -description, -product_information)
+
+
+reg_mod_sent <- reg_sent %>%
+  inner_join(reg_toys_prim, by = "uniq_id") %>%
+  left_join(reg_seller, by = "uniq_id") %>%
+  left_join(reg_cor_view, by = "uniq_id") %>%
+  left_join(reg_cor_buy, by = "uniq_id")  %>%
+  select(-date, -uniq_id, -rev_id, -manufacturer, -condition, -avg_rating) %>%
+  rename(n_stk = num_aval_stk)
+
+# Function
+
+# dealing with NA for linear modeling
+fill_NA <- function(x) {
+  # assuming the every toy has at least one seller, so we fill the n_seller with 1
+  x$n_seller[is.na(x$n_seller)] <- 1
+
+  # replace NA in num_aval_stk with the mean
+  x$n_stk[is.na(x$n_stk)] <- mean(is.na(x$n_stk))
+
+  # replace NA in also_view and also_bought with 0
+  x$n_also_view[is.na(x$n_also_view)] <- 0
+  x$n_also_bought[is.na(x$n_also_bought)] <- 0
+  x$num_answered_q[is.na(x$num_answered_q)] <- 0
+  
+  return(x)
+}
+
+reg_mod_sent <- fill_NA(reg_mod_sent)
+# check the # of NAs
+colSums(is.na(reg_mod_sent))
+
+
+###############################################
+# ggplot(reg_mod_sent, aes(rev_score)) +
+#   geom_histogram(bins = )
+# 
+# get_sentiments("afinn") %>%
+#   ggplot(aes(value)) +
+#   geom_histogram(bins = 10)
+```
+
+**1) EDA: Correlation**
+
+The lower left part of the correlation plot graphically demonstrates the magnitude of the correlation coefficients of each pair.
+
+Inspecting it vertically, I found that as indicated by the size and color of the circles the `n_stk` correlated with many variables, `n_also_bought`, `n_also_view`, `n_seller`, `show_stk`, and `num_rev`. This discovery indicated that the number of inventories for each product, to some identifiable extent, related to the number of also bought items, the number of also viewed items, whether the stock is displayed, and the number of reviews -- the pseudo sales volume.
+
+Then I inspected these explanatory variables horizontally. The `n_also_bought` correlates perfectly with the `n_also_view`, indicating that they have the same efficacy in explaining the variability in `n_stk`, our selected response variable, so I just included the `n_also_bought` in the model. 
+
+```{r corr}
+# inspect correlation
+corr(reg_mod_sent)
+```
+
+**2) Build Model**
+
+Builds a linear regression model using the selected variables.
+
+```{r model building}
+
+db_stk <- reg_mod_sent %>%
+  select(n_stk, n_also_bought, n_seller, show_stk, num_rev)
+
+mod_stk <- lm(n_stk ~ ., data = db_stk)
+```
+
+**3) Model evaluation**
+
+**Formula: n_stk = -3.81 + 0.39(n_also_bought) + 1.31(n_seller) + 4.49(show_stkTRUE) + 0.03(num_rev)**
+
+All of the explanatory variables are significant as indicated by the p-value -- Pr(>|t|). However, the R-squared is small with 0.356, which is not ideal and there is still a large part of the variability of the number of stock unexplained.
+
+
+```{r r-square and significance test}
+## 3. R-square, and individual significance
+summary(mod_stk)
+```
+
+Both overall and respectively to single variable, the residuals of model one skews positively rather than equally scattered around 0, so the model does not violated the three assumption of normally distributed residuals. We should build a new model also for this reason.
+
+```{r residual analysis}
+
+res_eval(mod_stk, db_stk)
+
+db_stk <- db_stk %>%
+  add_residuals(mod_stk)
+
+# ggplot(db_stk, aes(show_stk, ))
+```
+
+In summary, the model one is of little efficacy in prediction, especially that the model contradicts the assumption that the errors are normally distributed. 
+
+# 5. Updated model one -- ln(n_stk)
+
+Found via external desk research, it is can be the case that a one unit change in $x$ leads to a constant percent change in $y$. Hypothesizing does no harm so I just made another attempt by transforming the response variable, `n_stk`, logarithmically and building the second model based on it.
+
+```{r take a log}
+
+db_lstk <- db_stk %>%
+  mutate(lstk = log(n_stk)) %>%
+  select(lstk, n_also_bought, n_seller, show_stk, num_rev) %>%
+  # eliminate outliers
+  filter(n_seller < 20)
+```
+
+
+**1) EDA: Correlation**
+
+It is noticeable that there are large improvements in the correlations, especially the 0.84 of `show_stk` and the 0.64 of the `n_seller`.
+
+```{r corr plot}
+corr(db_lstk)
+```
+
+**2) Build Model**
+
+**Formula: lstk = -2.21 + 0.05(n_also_bought) + 0.16(n_seller) + 2.93(show_stkTRUE) + 0.0015(num_rev)**
+
+```{r for log n_stk}
+mod_lstk <- lm(lstk ~ ., data = db_lstk)
+```
+
+**3) R-squared and significance test**
+
+All of the explanatory variables are significant as indicated by the p-values -- Pr(>|t|).
+
+Most importantly, the R-squared and the adjusted R-squared both increased to 0.827, a large jump from the 0.356 of the first model. With the R-squared of 0.827, we can say that 82.7% variance in `lstk` can be explained by the variance of these predictors.
+
+```{r summary of model two}
+summary(mod_lstk)
+```
+
+
+**4) Residual Analysis**
+
+According to the residual plots, first, the distribution of the residuals as a whole is approximately normal now, and there is no traces of autocorrelation and inconsistent variance.
+
+Second, the plot for the number of reviews was not favorable, we should exclude the outliers to see if the model's efficacy in prediction will be improved. At the same time, the exclusion will limit the scope our model can apply to.
+
+```{r evaluate model two}
+res_eval(mod_lstk, mutate(db_lstk, n_stk = lstk))
+```
+
+**5) Model three: Eliminate outliers and rerun the model**
+
+After screening the data, I decided to filter out the data with number of reviews higher than 250.
+
+**Formula: lstk = -2.20 + 0.047(n_also_bought) + 0.16(n_seller) + 2.92(show_stkTRUE) + 0.0036(num_rev)**
+
+Eventually, the model manifested higher R-squared, 0.829, and residual plots are more favorable, so we shall just adopt the model three as our final model.
+
+```{r model 3}
+db_lstk2 <- db_lstk %>%
+  filter(num_rev <= 250)
+mod_lstk2 <- lm(lstk ~ ., data = db_lstk2)
+summary(mod_lstk2)
+res_eval(mod_lstk2, mutate(db_lstk2, n_stk = lstk))
+```
+
+
+# 6. Conclusion
+
+Eventually, we acquired a useful linear regression model for predicting the number of products in stock: <u>lstk = -2.20 + 0.047(n_also_bought) + 0.16(n_seller) + 2.92(show_stkTRUE) + 0.0036(num_rev)</u>.
+
+More specifically, we can predict the percentage increase in the number of products in stock using the second model since the response variable is the logarithmic of the absolute number. For example, every one unit increase in the number of items also bought will lead us to expect an approximate 0.047% increase in the number of a given product in stock. 
+
+We can also predict the absolute value by restroing the scale of the response variable with the natural exponent.
+
+
+```{r make prediction}
+
+test <- tribble(
+  ~n_also_bought, ~n_seller, ~show_stk, ~num_rev,
+  1,              5,         T,         40,
+  2,              5,         T,         40
+)
+
+writeLines("Predicted values:")
+(temp <- exp(predict(mod_lstk2, test)))
+writeLines(paste("The percentage increase is", round(temp[[2]]/temp[[1]] - 1, 4)*100))
+```
+
+The finding is of great interest of both a consumer and a manager.
+
+For one thing, the number of stock is not consistently available to consumers on Amazon so if s/he would like to find a highly homogenized product with high delivery reliability, it is advisable to check the stock of the specific one using these 4 parameters in case of urgent demand.
+
+For another, while it is favorable for consumer to choose products with sufficient inventory, a high volume in stock may indicate low management efficiency of a retailing store, no matter online or physical. Therefore, the model is useful for a manager to benchmark the company's competitors and to spiral its own strategy.
+
+

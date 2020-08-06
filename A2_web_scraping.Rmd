@@ -1,0 +1,765 @@
+---
+title: "A2_web_scraping"
+author: "Shengwei Zheng"
+date: "9/5/2019"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, warning = F, message = F, fig.width = 9, fig.height = 6)
+```
+
+# 1. Abstract and Motivation
+
+Continuing my past work on the Amazon toys dataset, I dived, and have been really wanting to, into the links stored in the `corr_view` data since we have not yet looked into it while it was the information behind the links that was precious to our analyses. For example, I was interested in the popularity of a certain product, especially when it was compared with its direct competitors since the category "building blocks" would definitely be considered in higher demand than customs in terms of the absolute number of shelved items.
+
+Therefore, I scraped the Amazon.com in this assignment, which I were not able to during the summer because, said Mr.Gleason, the website utilized JavaScript and only browser can convert it into actual html document. But with RSelenium, I built a virtual browser in a Linux environment and crawled the webpage via it with command lines. I sampled some links from the `customer also shoppped for` field and built a XXXXX model using Google tensorflow. The result was exhilarating that XXXXXX
+
+Insights from analysis: 
+
+- Big companies, especially those Japenese, like Konami, Tamiya, Pampers, and Hornby dominates the billboard of the most also viewed items.
+- The correlated visit majorly comes from products of the same category.
+- The position rank of also viewed items is random, not involving the price, star rating, and the number of reviews, which we can see on the original product's info page.
+
+
+# 2. Metadata and Environment Preparation
+
+Since I used Tnesorflow in this assignment, a high-level interface for neural networks from Google other than the packages introduced in the class, please run the chunk below to install and import this library.
+
+```{r package install}
+# devtools::install_github("rstudio/keras")
+library(keras)
+# install_keras()
+```
+
+
+```{r initialization, include = F, echo = F}
+library(tidyverse)
+library(tidytext)
+library(reprex)
+library(ggthemes)
+library(grid)
+library(gridExtra)
+library(scales)
+library(lubridate)
+library(tibbletime)
+library(Hmisc)
+library(RColorBrewer)
+library(ggpubr)
+library(tidyquant)
+library(reshape2)
+library(broom)
+library(modelr)
+# for web scraping
+library(rvest)
+library(xml2)
+library(httr)
+library(htmlTable)
+library(RSelenium)
+
+options(na.action = na.warn)
+
+# set working directory
+setwd("C:/WFU/Courses/Fall/Data_Mgmt/assignment")
+
+# Read the 9 exported csv files from Case Study of course <u>Introduction to R</u> into this working environment.
+toys_prim <- read_csv("toys_prim.csv")
+category <- read_csv("category.csv")
+corr_purchase <- read_csv("corr_purchase.csv") %>% na.omit()
+corr_view <- read_csv("corr_view.csv") %>% na.omit()
+price_range <- read_csv("price_range.csv")
+q_a <- read_csv("q_a.csv")
+rev <- read_csv("rev.csv")
+sellers <- read_csv("sellers.csv")
+sentiment_rev <- read_csv("sentiment_rev.csv")
+```
+
+
+The tables below show the structure of my data frames from web scraping apart from the original Amazon toys dataset.
+
+- **Primary table: toys_prim (10000 obs. of 11 variables)**
+
+| Variable Name | Data Structure | Description         |
+| ------------- | -------------- | ------------------- |
+| link_id       | char           | key/link of the toy |
+| product       | char           | toy's name          |
+| star_rating   | num            |                     |
+| price         | num            |                     |
+| n_rev         | num            | number of reviews   |
+
+- **`my_toy$category`**
+
+| Variable Name | Data Structure | Description         |
+| ------------- | -------------- | ------------------- |
+| link_id       | char           | key/link of the toy |
+| category      | char           |                     |
+
+- **`my_toy$review`**
+
+| Variable Name | Data Structure | Description          |
+| ------------- | -------------- | -------------------- |
+| link_id       | char           | key/link of the toy  |
+| title         | char           | review title         |
+| rating        | num            | review's star rating |
+| date          | Date           |                      |
+| author        | char           | reviewer             |
+| contents      | char           | review contents      |
+
+- **`my_toy$corr_view`**
+
+| Variable Name | Data Structure | Description               |
+| ------------- | -------------- | ------------------------- |
+| link_id       | char           | link                      |
+| also_view     | char           | link of also viewed items |
+
+
+
+- **`my_toy$corr_purchase`**
+
+| Variable Name | Data Structure | Description               |
+| ------------- | -------------- | ------------------------- |
+| link_id       | char           | link                      |
+| also_bought   | char           | link of also bought items |
+
+
+
+
+# 2. Web scraping
+
+Continuing my exploration on the Amazon toy's dataset, I decided to exploit the "Customers also shopped for" field because the relations between products are the most valueable information on the all-linked Internet and it was the "endorsement" of a website to another that the Google or other serach engines employed in their algorithms.
+
+However, Amazon has deployed many anti-crawler techniques. Kindly recommended by Mr.Gleason, our guest speaker, I used RSelenium, which is very powerful in such situation but time-consuming simultaneously -- 48 hours for me to acquire 10K+ entries.
+
+
+## 2.1 For a single page - Corr2 Attempt
+
+If we try crawling the amazon's product page with `rvest` directly, we will get a void value on many relevant fields such as the "Customers also shopped for". My suspicion is that Amazon's product webpages utilize Adobe Flash or JavaScript to save data celluar in the communication so we have to deceive Amazon with a virtual browser created by `RSelenium`.
+
+```{r single page attempt}
+
+# Customers also shopped for
+(link <- corr_view$also_view[1])
+doc <- read_html(link)
+  
+# corr name
+# #anonCarousel1 .p13n-sc-truncated
+doc %>%
+  html_nodes(css = "#anonCarousel1 .p13n-sc-truncated")
+```
+
+
+## 2.2 For a single page - RSelenium
+
+The RSelenium enables us to communicate with a remote or local server with command lines -- navigate to the targeted website, access certain HTML nodes, scrape them down, then next.
+
+Here I used a browser set up on my personal computer in a Linux environment.
+
+It is truly amazing that we can see how the virtual browser interact with us when we send commands to it.
+
+```{r corr RSelenium, eval = F}
+
+## 1. SET UP RSELENIUM
+# Before we access the server on R, we need to initiate an instance in our local environment by ruinning the line below in the docker.
+# docker run --name chrome  -d -p 4445:4444 -p 5901:5900 selenium/standalone-chrome-debug:latest
+
+```
+
+![docker1](C:/WFU/Courses/Fall/Data_Mgmt/assignment/A2_pic/docker1.png)
+
+```{r connect to server}
+# tools used: docker, standalone-chrome, tightVNC
+# need to change based on the local ip shown in the machine's docker
+IP <- "192.168.99.100"
+
+# set up our virtual browser
+remDr <- remoteDriver(remoteServerAddr = IP,
+                      port = 4445L,
+                      browser = "chrome")
+
+# check available keys that wen can send
+RSelenium:::selKeys %>% names()
+
+
+# initiate our browser
+remDr$open()
+remDr$navigate("http://www.google.com")
+Sys.sleep(5)
+webElem <- remDr$findElement("name", "q")
+Sys.sleep(5)
+webElem$sendKeysToElement(list("HELLO WORLD"))
+Sys.sleep(5)
+webElem$sendKeysToElement(list(key = 'enter'))
+
+# # can also play with the browser using the code below
+# class(remDr)
+# remDr$goBack()
+# remDr$goForward()
+```
+
+By using the TightVNC, a remote control software, we can visualize our server in real time. To do that, we need to download and install this software with the Administrator's authorization, launch it, fill in the first blank with the id and the port, 192.168.99.100:: on my computer, click connect, and use the "secret" as the password as set by the docker ["standalone-chrome"](https://github.com/SeleniumHQ/docker-selenium).
+
+![vnc1](C:/WFU/Courses/Fall/Data_Mgmt/assignment/A2_pic/vnc1.png)
+
+
+Then I attempted scraping the first observation of table `corr_view` on the same webpage as the last time again.
+
+```{r single page attempt2}
+## 2. SCRAPING
+
+remDr$navigate(link)
+
+Sys.sleep(5)
+
+get_html <- function(remDr){
+  remDr$getPageSource() %>%
+   .[[1]] %>%
+  read_html()
+}
+
+doc <- get_html(remDr)
+
+# we finally have something valid
+doc %>%
+    html_nodes(css = "#bundleV2_feature_div+ .celwidget .a-carousel-initialized") %>%
+    html_text() %>%
+    str_trim()
+
+```
+
+Exciting! We got something valid now!
+
+Then I continued my work -- formatting multiple fields into a tidy table. It was worth mentioning that I handled errors by employing `tryCatch()` as errors are common situations met in web scraping.
+
+```{r single page attempt2 cont}
+# Initialization for the loop
+
+# create a function for multiple field
+get_product <- function(link, remDr){
+  
+  # The dataset originates from the UK's Amazon
+  base_link <- "http://www.amazon.co.uk"
+  
+  # Initilization for the function
+  
+  # buffer time for webpage to load
+  
+  doc <- get_html(remDr)
+  remDr$navigate(link)
+
+  # regard link as the id of an observation -- product (toy)
+  
+  # product_name
+  # #productTitle
+  product_name <- doc %>%
+    html_nodes("#productTitle") %>%
+    html_text() %>%
+    str_trim()
+  
+  # brand
+  # #bylineInfo
+  brand <- doc %>%
+    html_nodes("#bylineInfo") %>%
+    html_text() %>%
+    str_trim()
+  
+  # star rating
+  # .arp-rating-out-of-text
+  product_star <- doc %>%
+    html_nodes(".arp-rating-out-of-text") %>%
+    html_text() %>%
+    str_trim() %>%
+    # convert string to number
+    str_remove_all(" out of 5 stars") %>%
+    as.numeric()
+  
+  # price
+  # #priceblock_ourprice
+  product_price <- doc %>%
+    html_nodes("#priceblock_ourprice") %>%
+    html_text() %>%
+    str_trim() %>%
+    str_remove_all("£") %>%
+    as.numeric()
+  
+  # category
+  # #wayfinding-breadcrumbs_feature_div .a-size-small
+  category <- doc %>%
+    html_nodes("#wayfinding-breadcrumbs_feature_div .a-size-small") %>%
+    html_text() %>%
+    str_trim() %>%
+    str_remove_all("\n[[:space:]]*")
+  
+  # n_rev
+  # #prodDetails .a-size-small .a-link-normal
+  n_rev <- doc %>%
+    html_nodes("#prodDetails .a-size-small .a-link-normal") %>%
+    html_text() %>%
+    str_trim() %>%
+    str_remove_all(" customer reviews") %>%
+    as.numeric()
+  
+  ######
+  # also_view
+  # #anonCarousel1 .a-link-normal
+  partial_also_view <- doc %>%
+    html_nodes("#anonCarousel1 .a-link-normal.a-text-normal") %>%
+    html_attr("href")
+  also_view <- paste0(base_link, partial_also_view)
+  
+  ######
+  # also_bought 
+  # #anonCarousel2 .a-link-normal
+  partial_also_bought <- doc %>%
+    html_nodes('#anonCarousel2 .a-link-normal.a-text-normal') %>%
+    html_attr("href")
+  also_bought <- paste0(base_link, partial_also_bought)
+  
+  ########
+  ## review
+  
+  # rev_title
+  # #cm-cr-dp-review-list .a-text-bold span
+  rev_title <- doc %>%  
+    html_nodes(".review-title-content.a-text-bold") %>%
+    html_text() %>%
+    str_trim()
+  
+  # rev_author
+  # .a-profile-name
+  rev_author <- doc %>%  
+    html_nodes(".a-profile-name") %>%
+    html_text() %>%
+    str_trim()
+  
+  # rev_date
+  # .review-date
+  rev_date <- doc %>%  
+    html_nodes(".review-date") %>%
+    html_text() %>%
+    str_trim() %>%
+    as.Date(format = "%d %B %Y")
+  
+  ## hard, capture pop up content
+  # rev_rating
+  # #cm-cr-dp-review-list .a-icon-alt
+  rev_star <- doc %>%
+    html_nodes(".cr-translate-cta+ .a-row") %>%
+    html_nodes(".a-icon-alt") %>%
+    html_text() %>%
+    str_trim() %>%
+    # convert string to number
+    str_remove_all(" out of 5 stars") %>%
+    as.numeric()
+  
+  rev_star2 <-  doc %>%
+    html_nodes("#cm-cr-cmps-review-list .celwidget") %>%
+    html_nodes(".a-icon-alt") %>%
+    html_text() %>%
+    str_trim() %>%
+    # convert string to number
+    str_remove_all(" out of 5 stars") %>%
+    as.numeric()
+    
+  rev_star <- append(rev_star, rev_star2)
+  # rev_contents
+  # .a-expander-partial-collapse-content span
+  rev_contents <- doc %>%  
+    # .cr-widget-CrossMarketplaceSharing , .card-padding
+    html_nodes(".cm_cr_grid_center_container") %>%
+    html_nodes(".a-expander-partial-collapse-content > span") %>%
+    html_text() %>%
+    str_trim()
+  
+  ###################################
+  ## create relational tables
+  tryCatch({
+  # 1.primary table
+  toys_prim <- tibble(
+    link_id = link,
+    brand = brand,
+    product = product_name,
+    star_rating = product_star,
+    price = product_price,
+    n_rev = n_rev
+  )
+  
+  # 2.category
+  category <- tibble(
+    link_id = link,
+    category = category
+  )
+  
+  # 3. review
+  review <- tibble(
+    link_id = link,
+    title = rev_title,
+    rating = rev_star,
+    date = rev_date,
+    author = rev_author,
+    contents = rev_contents
+  )
+  
+  # 4. corr_view
+  corr_view <- tibble(
+    link_id = link,
+    also_view = also_view
+  )
+  
+  # 5. corr_purchase
+  corr_purchase <- tibble(
+    link_id = link,
+    also_bought = also_bought
+  )
+  })
+  out <- list(
+    "toys_prim" = toys_prim, 
+    "category" = category, 
+    "review" = review, 
+    "corr_view" = corr_view, 
+    "corr_purchase" = corr_purchase)
+  
+  return(out)
+}
+
+(my_toy <- get_product(link, remDr))
+
+# remDr$close()
+```
+
+In fact we can go with the hyperlink infinitely in Amazon as long as it provides us with the "Customers also shopped for" or "Customers who bought this item also bought". The directory of hyperlinks essentially form a directed graph to which we can apply the graph theory. That is exactly how Google establish its search system and can be of the interest of future analyses.
+
+## 2.3 For multiple pages using for loop
+
+The reason we use for loop instead of `map()` with a wrapper or other vectorized computation is that it is easier for us to debug using for loop because: 
+- it break where the error happens
+- the `map()` will just split up and we have to start over again every time
+
+Before the iteration, we need a binder to `bind_rows()` of our result then store it.
+
+```{r binder}
+
+# write 
+rbind_product <- function(my_product, new_product) {
+  my_prim <- bind_rows(my_product$toys_prim, new_product$toys_prim)
+  my_category <- bind_rows(my_product$category, new_product$category)
+  my_rev <- bind_rows(my_product$review, new_product$review)
+  my_corr_view <- bind_rows(my_product$corr_view, new_product$corr_view)
+  my_corr_purchase <- bind_rows(my_product$corr_purchase, new_product$corr_purchase)
+  
+  out <- list(
+    "toys_prim" = my_prim, 
+    "category" = my_category, 
+    "review" = my_rev, 
+    "corr_view" = my_corr_view, 
+    "corr_purchase" = my_corr_purchase)
+  
+  return(out)
+}
+
+# test it
+new_toy <- get_product(corr_view$also_view[2], remDr)
+rbind_product(my_toy, new_toy)
+
+# test it
+new_toy <- get_product(corr_view$also_view[50], remDr)
+rbind_product(my_toy, new_toy)
+
+```
+
+It appears that we acquired some blank pages at this step because they had expired or were formatted in a different ways. <- what's next: robustness. Though the phenomenon compromises the completeness of our dataset, we can easily get rid of empty observations using `semi_join()`, keeping only those with the primary information stored in the `toys_prim` table. Same issues might happen in the following scraping over the whole dataset but that is acceptable.
+
+```{r multiple page initialization}
+
+# initialization for the loop
+i <- 0
+link <- corr_view$also_view[1]
+remDr$navigate(link)
+my_toy <- get_product(link, remDr)
+```
+
+As it was too time-consuming to scrape the data again, I did not run the chunk below while kniting the report (can see how it works in the GIF I provided with), and a .RData file containing all my result would be included in my submission as the supplement.
+
+```{r multiple page, eval = F}
+# my_toy <- get_product(corr_view$also_view[1], remDr)
+t1 <- Sys.time()
+
+# for (link in corr_view$also_view[-1]) {
+# the indexing is inclusive
+
+# 20190924 1:21 AM i = 21797
+# 28654
+# 19165
+# 29244 30769
+# 12007/36758
+for (link in corr_view$also_view[i+1:nrow(corr_view)]) {
+  # counting, provide location for debugging
+  i <- i + 1
+
+  new_toy <- get_product(link, remDr)
+  my_toy <- rbind_product(my_toy, new_toy)
+      
+}
+t2 <- Sys.time()
+writeLines(paste("Time elapsed:", format(t2 - t1, format = "%h")))
+print(i)
+
+# remDr$close()
+```
+
+```{r load scraped data}
+load("my_toy.RData")
+```
+
+![scraping](C:/WFU/Courses/Fall/Data_Mgmt/assignment/A2_pic/scraping.gif)
+
+```{r debugging purpose, include = F, eval = F}
+remDr$open()
+remDr$navigate(corr_view$also_view[i])
+doc <- get_html(remDr)
+```
+
+
+
+# 3. Analyses
+
+With the harvest from web scraping in the last chapter, it is time for us to extract insights from the dataset and even from the combination of the two toys dataset we have. As the assignment is themed "web scraping", I obtained as many useful information as possible while I did not utilize all of it in the analyses part after exploration.
+
+## 3.1 Tidying the data
+
+First thing first, because plenty of product pages expired or our crawler is not robust to every situation, I acquired not all but 32.66% the links iterated in a 48-hour web scraping (12007/36758 = 32.66%). That means we need to exclude some incomplete entries before diving into our analyses.
+
+```{r tidy}
+corr_view <- corr_view %>%
+  group_by(uniq_id) %>%
+  mutate(cv_rank = row_number()) %>%
+  ungroup() %>%
+  group_by(also_view) %>%
+  mutate(cv_id = row_number()) %>%
+  ungroup()
+
+# delete the first repeated row
+toys_prim_cv <- my_toy$toys_prim[2:12008,] %>%
+  group_by(link_id) %>%
+  mutate(cv_id = row_number()) %>%
+  ungroup()
+
+cv_full <- toys_prim %>%
+  select(uniq_id, price, num_rev, avg_rating) %>%
+  inner_join(corr_view, by = "uniq_id") %>% rename(link_id = also_view) %>%
+  inner_join(toys_prim_cv, by = c("link_id", "cv_id")) %>%
+  mutate(price_prim_corr = price.x - price.y) 
+
+reg <- cv_full %>%
+  select(-price.x, -price.y, -link_id, -uniq_id, -product, -cv_id) %>%
+  rename(prim_rating = avg_rating, corr_rating = star_rating, prim_nrev = num_rev, corr_nrev = n_rev) %>%
+  na.omit()
+
+
+```
+
+
+## 3.2 King of "also shopped for" -- **Yu-Gi-Oh Premium Gold Booster Pack - 15 Cards**
+
+Big companies, especially those Japenese, like Konami, Tamiya, Pampers, and Hornby dominates the billboard of the most also viewed items. Combining my own experience in my analysis, I have to say that Japanese toy comanies usually do a great job in deploying their product matrix by launching extandables with many components or differentiating the same one to take over every niche.
+
+```{r count}
+top30_cv <- cv_full %>%
+  count(product) %>%
+  arrange(by = desc(n)) %>%
+  top_n(30, n) %>%
+  mutate(product2 = fct_reorder(product, n)) 
+
+  # plot it
+top30_cv %>%
+  ggplot(aes(product2, n)) +
+  geom_col(alpha = 0.65, width = 0.618, aes(fill = n)) +
+  # trim the axis labels, it was too long
+  scale_x_discrete(label=function(x) paste0(strtrim(x, 30), "...")) +
+  coord_flip() +
+  theme(axis.ticks = element_line(color = "white"), legend.position = "none") +
+  geom_text(aes(y = n, label = n), position = position_dodge(0.9), hjust = -0.5) +
+  # scale_y_continuous(limit = c(-10, 5000), breaks = seq(0, 5000, by = 1000)) +
+  labs(title = "Overall top 30 words based on frequency after removing stop words",
+       x = "word",
+       y = "frequency") +
+  scale_fill_gradient(low = "#AFEEEE", high = "#9400D3")
+```
+
+
+
+
+## 3.3 The correlated visit majorly comes from products of the same category
+
+We should notice that on Amazon the filed of "also view" was also occupied by products of the same brand/manufacturer and the phenomenon applies increasingly to famous brands. We should dig into the brands correlation's to determine whether the hypothesis holds.
+
+```{r comes from}
+
+# category
+cat_cv <- my_toy$category %>%
+  distinct() 
+
+cat_cv_first <- cat_cv %>%
+  separate_rows(category, sep = "[[›]]") %>%
+  group_by(link_id) %>%
+  dplyr::summarize(cat_cv_f = first(category))
+
+source_cat <- cv_full %>%
+  filter(product %in% top30_cv$product) %>%
+  left_join(distinct(cat_cv_first, link_id, .keep_all = TRUE), by = "link_id") %>%
+  left_join(select(category, uniq_id, cat1),
+            by = "uniq_id") %>%
+  mutate(same_cat = (cat1 == cat_cv_f)) %>%
+  group_by(product, same_cat) %>%
+  count(product) %>%
+  ungroup()
+
+
+source_cat %>%
+  na.omit() %>%
+  ggplot(aes(product, n, fill = same_cat, label = n)) +
+    geom_col(width = 0.618, alpha = 0.8, position = "fill") +
+    theme(axis.ticks = element_line(color = "white")) +
+    labs(title = "How many were from the same category") +
+  scale_x_discrete(label=function(x) paste0(strtrim(x, 30), "...")) +
+  coord_flip() +
+  labs(y = "proportion")
+
+```
+
+## 3.4 The position of products in the "also view" field is random
+
+At first I suspected that deciding the position of a related product may involve the consideration of the features such as the number of reviews, the star raing, the price because those are the information shown directly on a product info page without cliking the hyperlink. Personally, I sometimes would be lured by the recommended "also view' items and be converted eventually by another seller than the one I initially chose. Therefore, it was reaonable to hypothesize that the sellers or manufacturers would campaign in this zone. A common and mature strategy adopted by Consumer Packaged Goods company like P&G is to position products that compete directly with its compatibles because this is a game of "beat or beaten", no middle ground. 
+
+However, the model trained with Neural Network of Tensorflow seemed that these features does not have an impact on the postion rank of the also viewed items. The explanation from me is still that the analysis of the consumer behavior is so all-inclusive that demand a higher-dimension data.
+
+Here, I employed a `sequential` model with two densely connected hidden layers, and an output layer that returns a single value. The model building steps are wrapped in a function, build_model. And I decided the MSE, mean square error to be our objective function.
+
+Terminology explanation:
+- epoch: The number of epochs is a hyperparameter that defines the number of times that the learning algorithm will work through the entire training dataset.
+
+```{r n_rev star order}
+
+### 1 DATA BANK ACQUIRING
+
+## 80% of the sample size
+smp_size <- floor(0.8 * nrow(reg))
+
+## set the seed to make your partition reproducible
+set.seed(123)
+train_ind <- sample(seq_len(nrow(reg)), size = smp_size)
+
+train_reg <- reg[train_ind, ]
+test_reg <- reg[-train_ind, ]
+
+train <- train_reg %>% select(- cv_rank)
+train_labels <- train_reg %>% select(cv_rank) 
+train_labels <- train_labels$cv_rank
+
+test <- test_reg %>% select(- cv_rank)
+test_labels <- test_reg %>% select(cv_rank) %>% as.vector()
+test_labels <- test_labels$cv_rank
+
+
+### 2 SCALE
+# Test data is *not* used when calculating the mean and std.
+
+# Normalize training data
+train <- scale(train) 
+
+# Use means and standard deviations from training set to normalize test set
+col_means_train <- attr(train, "scaled:center") 
+col_stddevs_train <- attr(train, "scaled:scale")
+test <- scale(test, center = col_means_train, scale = col_stddevs_train)
+
+train[1, ] # First training sample, normalized
+test[1, ] # First testing sample, normalized
+
+
+### 3 CREATE MODEL
+
+build_model <- function() {
+  
+  model <- keras_model_sequential() %>%
+    layer_dense(units = 64, activation = "relu",
+                input_shape = dim(train)[2]) %>%
+    layer_dense(units = 64, activation = "relu") %>%
+    layer_dense(units = 1)
+  
+  model %>% compile(
+    loss = "mse",
+    optimizer = optimizer_rmsprop(),
+    metrics = list("mean_absolute_error")
+  )
+  
+  model
+}
+
+model <- build_model()
+model %>% summary()
+
+
+### 4 TRAIN THE MODEL
+
+# Display training progress by printing a single dot for each completed epoch.
+print_dot_callback <- callback_lambda(
+  on_epoch_end = function(epoch, logs) {
+    if (epoch %% 80 == 0) cat("\n")
+    cat(".")
+  }
+)   
+
+# default to 500, can be increased if the model does not converge at 500 iterations. The quicker towards convergence, the more robust the model.
+epochs <- 500
+
+# Fit the model and store training stats
+history <- model %>% fit(
+  train,
+  train_labels,
+  epochs = epochs,
+  validation_split = 0.2,
+  verbose = 0,
+  callbacks = list(print_dot_callback)
+)
+
+plot(history, metrics = "mean_absolute_error", smooth = FALSE) +
+  coord_cartesian(ylim = c(0, 2))
+
+```
+
+The model converges very quickly, so we can stops the training earlier if a set amount of epochs elapses without showing improvement.
+
+```{r tf2}
+early_stop <- callback_early_stopping(monitor = "val_loss", patience = 20)
+
+model <- build_model()
+history <- model %>% fit(
+  train,
+  train_labels,
+  epochs = epochs,
+  validation_split = 0.2,
+  verbose = 0,
+  callbacks = list(early_stop, print_dot_callback)
+)
+
+plot(history, metrics = "mean_absolute_error", smooth = FALSE) +
+  coord_cartesian(xlim = c(0, 50), ylim = c(0, 5))
+```
+
+
+# 4. Conclusion 
+
+The work this time leaves me with valuable techniques and data to explore.
+
+The `RSelenium` armed us with the ability to crawl infomation from more kinds of websites although it was very slow compared to `rvest`. I expect a possile improvemnt technically to be the multi-thread progamming.
+
+With these preparation, I found that part of companies would make efforts to take over the "also view" area, preventing it from leaving to competitors. Besides, even the neural network analysis using Tensorflow can not partition the layout of the field since the information is limited. 
+
+The very analysis I wish I had time for was the network analysis using an algorithm like PageRank as an extension of my comparison between the categories as I proposed in Case Study 1. I will consider this Rmd a breathing document and plish it in the future.
+
+
+
+# Acknowledgement
+
+I would like to give my personal thanks to Mr.Gleason who brought two powerful tools to me that solved exactly what I encountered during the one-month web-scarping tasks. The selectorGadget helped me find the xpath easily and visually, and the RSelenium created a virtual browser for me so that I can scale my "copy-and-paste" to thousands.
